@@ -4,15 +4,19 @@ import torch
 import torch.nn as nn
 import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, TQDMProgressBar, EarlyStopping
-from pytorch_lightning.loggers import WandbLogger
+# from pytorch_lightning.loggers import WandbLogger
 import kornia.augmentation as K
-import wandb
+# import wandb
+import logging
+from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.callbacks import Callback
 
 from src.constants import Column
 from src.transformation import ArcsinhTransform, MinMaxNorm
 from src.callbacks import ImagePredictionLogger
 from src.helper import get_images, set_seed, get_module
 from embed import embed
+import time
 
 from argparse import ArgumentParser
 
@@ -116,7 +120,7 @@ logger_p = {
                 "save_dir": args.save_dir,
                 }
 data_param = {
-                "dataset_path": {'ntc': args.dataset_path_ntc, 'perturbed': args.dataset_path_perturbed},
+                "dataset_path": {'ntc': args.dataset_path_ntc, 'perturbed': args.dataset_path_perturbed}, # 
                 "plate_list": args.plate_list,
                 "test_ratio": args.test_ratio,
                 "save_dir": args.save_data_dir,
@@ -190,20 +194,32 @@ def train():
     dm.setup(stage='fit')
     example_img = get_images(8, dm.val_dataloader(), data_param['transform'])
 
-    # wandb login
-    wandb.login(host='https://genentech.wandb.io')
 
-    # initialise the wandb logger and name your wandb project
-    wandb_logger = WandbLogger(**logger_p)
+    # need to figure out logging...
 
-    # add your data parameters to the wandb config
-    wandb_logger.experiment.config.update(data_param)
-    wandb_logger.experiment.log_code(root='/home/wangz222/contrastive-ops/src')
+    logging.basicConfig(
+        filename=f"{logger_p['save_dir']}/training.log", 
+        filemode="w",
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )   
+    logger = logging.getLogger()
+    csv_logger = CSVLogger(save_dir=logger_p['save_dir'], 
+                           name=logger_p['name'])
+
+
+    # # wandb login
+    # wandb.login(host='https://genentech.wandb.io')
+    # # initialise the wandb logger and name your wandb project
+    # wandb_logger = WandbLogger(**logger_p)
+    # # add your data parameters to the wandb config
+    # wandb_logger.experiment.config.update(data_param)
+    # wandb_logger.experiment.log_code(root='/home/wangz222/contrastive-ops/src')
 
     # define model
     model = ModelClass(**model_param)
-    print('model defined')
-
+    logger.info('model defined')
+    run_id = str(int(time.time()))
     # Create a PyTorch Lightning trainer with the generation callback
     trainer = L.Trainer(
         accelerator="gpu",
@@ -217,26 +233,28 @@ def train():
             EarlyStopping(verbose=True, **earlystop),
             ],
         check_val_every_n_epoch=1,
-        logger=wandb_logger,
+        logger=csv_logger,
         # deterministic=True,
         # detect_anomaly=True,
         **train_param,
     )
     torch.set_float32_matmul_precision('high')
-    print('trainer defined')
+    logger.info('trainer defined')
 
     # training model
     trainer.fit(model, dm)  
     torch.cuda.empty_cache()
-    print('model trained')
-    wandb.finish() 
-    
+    logger.info('model trained')
+
     # embedding
-    run_id = wandb_logger.experiment.id
-    run_name = wandb_logger.experiment.name
-    loader_param = {"batch_size": 4200, "num_workers": data_param['loader_param']['num_workers']}
-    embed(run_id=run_id, run_name=run_name, loader_param=loader_param, module=args.module)
-    print('embedding computed')    
+    loader_param = {"batch_size": 4200, 
+                    "num_workers": data_param['loader_param']['num_workers']}
+    embed(run_id=run_id, 
+          run_name=logger_p["name"], 
+          save_dir=logger_p["save_dir"], 
+          loader_param=loader_param, 
+          module=args.module)
+    logger.info('embedding computed')    
 
 if __name__ == '__main__':
     train()

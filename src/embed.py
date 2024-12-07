@@ -1,32 +1,57 @@
 from pathlib import Path
 from src.helper import get_module, embed_images
+import logging
 import argparse
-import wandb
-from lightning.pytorch.loggers import WandbLogger
+# import wandb
+# from lightning.pytorch.loggers import WandbLogger
 
-def embed(run_id, run_name, version='best', loader_param=None, module='contrastive'):
-    '''
-    wandb_logger: the wandb logger object
-    loader_param: the parameters for the dataloader
-    '''
-    # save run id and run name to file
-    checkpoint_reference = f'wang-jerry/ops-training/model-{run_id}:{version}'
-    artifact_dir = WandbLogger.download_artifact(artifact=checkpoint_reference)
-    print(checkpoint_reference)
 
-    # load checkpoint
-    modelname = run_name.split('_')[0]
-    ModelClass = get_module(modelname, 'model')
-    DataClass = get_module(module, 'dataloader')
+def embed(run_id, run_name, save_dir, version='best', loader_param=None, module='contrastive', artifact_fetcher=None):
+    """
+    General-purpose embedding function.
+
+    Args:
+        run_id (str): ID of the run or experiment.
+        run_name (str): Name of the run or experiment.
+        save_dir (str): Directory where the embeddings should be saved.
+        version (str): Version of the model checkpoint (default: 'best').
+        loader_param (dict): Parameters for the dataloader (default: None).
+        module (str): Module to identify the data loader type (default: 'contrastive').
+        artifact_fetcher (function): Function to fetch model artifacts (default: None).
+
+    Returns:
+        None
+    """
+    logging.info(f"Starting embedding for run ID: {run_id}, run name: {run_name}, version: {version}")
+    
+    if artifact_dir is None:
+        artifact_dir = Path(save_dir) / "artifacts" / run_id  # Default location
+    logging.info(f"Resolved artifact directory: {artifact_dir}")
 
     checkpt_path = Path(artifact_dir) / "model.ckpt"
+    if not checkpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint file not found at {checkpt_path}")
+    logging.info(f"Loading checkpoint from: {checkpt_path}")
+    
+    modelname = run_name
+    ModelClass = get_module(modelname, 'model')
+    DataClass = get_module(module, 'dataloader')
+    
+    logging.info(f"Loading checkpoint from: {checkpt_path}")
     model = ModelClass.load_from_checkpoint(checkpt_path)
     dm = DataClass.load_from_checkpoint(checkpt_path)
 
-    embedding_df = embed_images(model, dm, stage='embed', loader_param=loader_param, modelname=module)
-    embedding_df.to_pickle(f'/home/wangz222/scratch/embedding/{run_name}_{run_id}_{version}.pkl')
+    logging.info(f"Generating embeddings for module: {module}")
+    embedding_df = embed_images(model, 
+                                dm, 
+                                stage='embed', 
+                                loader_param=loader_param, 
+                                modelname=module)
+    
+    output_file = Path(save_dir) / f'{run_name}_{run_id}_{version}.pkl'
+    embedding_df.to_pickle(output_file)
+    logging.info(f"Embeddings saved to: {output_file}")
 
-    wandb.finish() # end wandb run
 
 
 if __name__ == "__main__":
