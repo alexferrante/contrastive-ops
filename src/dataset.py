@@ -57,7 +57,7 @@ class OPSdataset(Dataset):
         uid = row[Column.uid.value]
         # stage = row[Column.gene.cell_cycle_stage.value]
 
-        key = f'{uid}_{plate}_{well}_{tile}_{gene}_{index}'
+        key = row[Column.image_path.value]
         _env_name = 'ntc' if gene == 'nontargeting' else 'perturbed'
 
         if _env_name in self._env_dict:

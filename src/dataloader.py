@@ -61,6 +61,9 @@ class BaseDataModule(L.LightningDataModule):
         save_dir = self.save_dir
         # train/val/test split
         if not os.path.exists(os.path.join(save_dir, 'perturbed_filtered.pkl')):
+            # filter based on 1) plate list 2) dist. to edge in FOV
+            # adds "batch" column = "plate" + "well"
+            # return dict of dfs: {"ntc": df_ntc, "perturbed": df_pert}
             metadata_df = self.get_filtered_df(self.data_param['dataset_path'], 
                                             self.data_param['plate_list'], 
                                             crop_size=self.crop_size,
@@ -71,7 +74,7 @@ class BaseDataModule(L.LightningDataModule):
         else:
             metadata_df = self.read_in_dict_of_df(save_dir)
         if not os.path.exists(os.path.join(save_dir, 'ntc_train.pkl')):
-            metadata_df = self.read_in_dict_of_df(save_dir)
+            metadata_df = self.read_in_dict_of_df(save_dir) # {"ntc": df_ntc, "perturbed": df_pert}
             splits = self.split_dataframe(metadata_df, self.test_ratio, shuffle=False)
             for key, val in splits.items():
                 val.to_pickle(f'{save_dir}/{key}.pkl')
@@ -160,8 +163,8 @@ class BaseDataModule(L.LightningDataModule):
                         crop_size: float):
         # read in metadata, used for sampling cells
         df_all = {}
-        for key, val in dataset_path.items():
-            df = pd.read_csv(f'{val}/key.csv', dtype={'UID': str})
+        for key, val in dataset_path.items(): # dict with 2 keys: "ntc", "perturbed"; specify folders
+            df = pd.read_csv(f'{val}/key.csv', dtype={Column.uid.value: str})
 
             # only keep cells from the pre-defined plate list
             df = df[df[Column.plate.value].isin(plate_list)]
@@ -172,7 +175,7 @@ class BaseDataModule(L.LightningDataModule):
                                 df[Column.cell_x.value].between(radius, PH_DIMS[1] - radius)]
             
             # add batch column as concatenation of plate and well label
-            df['batch'] = df['plate'] + df['well']
+            df['batch'] = df[Column.plate.value] + df[Column.well.value]
             df_all[key] = df
 
         # add cell cycle stage

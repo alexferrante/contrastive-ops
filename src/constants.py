@@ -27,8 +27,9 @@ class Column(Enum):
     cell_x = 'cell_j'
     cell_cycle_stage = 'stage'
     batch = 'batch'
-    uid = 'UID'
+    uid = 'id'
     function = 'function'
+    image_path = 'single_cell_image'
 
 class cell_cycle(Enum):
     mitotic = 'mitotic'
