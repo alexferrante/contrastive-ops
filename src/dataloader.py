@@ -251,11 +251,25 @@ class ContrastiveDataModule(BaseDataModule):
                 self.loader_param[key] = val
         return DataLoader(self.ds_all, shuffle=False, drop_last=False, **self.loader_param)
     
+    # @staticmethod
+    # def collate_fn(batch):
+    #     batch_dict = {}
+    #     for name in batch[0].keys():
+    #         batch_dict[name] = torch.stack([item[name] for item in batch])
+    #     return batch_dict
+
     @staticmethod
     def collate_fn(batch):
-        batch_dict = {}
-        for name in batch[0].keys():
-            batch_dict[name] = torch.stack([item[name] for item in batch])
+        batch_dict = {
+            "background_id": [item["background_id"] for item in batch],
+            "target_id": [item["target_id"] for item in batch],
+        }
+        for key in batch[0].keys():
+            if key not in ["background_id", "target_id"]:
+                if isinstance(batch[0][key], torch.Tensor):
+                    batch_dict[key] = torch.stack([item[key] for item in batch])
+                else:
+                    batch_dict[key] = [item[key] for item in batch]
         return batch_dict
     
 class DualDatasetGenerator:
@@ -296,5 +310,3 @@ class DualDatasetGenerator:
                 return {'background': bg_x, 'target': tg_x, 'background_label': bg_y, 'target_label':tg_y}
         else:
             return {'background': bg_samples, 'target': tg_samples}
-
-

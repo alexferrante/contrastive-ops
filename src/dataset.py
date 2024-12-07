@@ -10,6 +10,7 @@ from src.constants import Column
 from memory_profiler import profile
 from copy import deepcopy
 from itertools import cycle
+from skimage import io
 
 class OPSdataset(Dataset):
     def __init__(self, 
@@ -49,7 +50,6 @@ class OPSdataset(Dataset):
 
     def read_single_cell_image(self, df_index):
         row = self.df.iloc[df_index]
-        index = row[Column.index.value]
         plate = row[Column.plate.value]
         well = row[Column.well.value]
         tile = str(row[Column.tile.value])
@@ -58,24 +58,26 @@ class OPSdataset(Dataset):
         # stage = row[Column.gene.cell_cycle_stage.value]
 
         key = row[Column.image_path.value]
-        _env_name = 'ntc' if gene == 'nontargeting' else 'perturbed'
 
-        if _env_name in self._env_dict:
-            env = self._env_dict[_env_name]
-        else:
-            path = self.dataset_path[_env_name]
-            if os.path.exists(path):
-                env = lmdb.Environment(path, readonly=True, readahead=False, lock=False)
-                self._env_dict[_env_name] = env
-            else:
-                warnings.warn(f"LMDB dataset for {_env_name} doesn't exist")
-                env = None
+        # _env_name = 'ntc' if gene == 'nontargeting' else 'perturbed'
+        
+        # if _env_name in self._env_dict:
+        #     env = self._env_dict[_env_name]
+        # else:
+        #     path = self.dataset_path[_env_name]
+        #     if os.path.exists(path):
+        #         env = lmdb.Environment(path, readonly=True, readahead=False, lock=False)
+        #         self._env_dict[_env_name] = env
+        #     else:
+        #         warnings.warn(f"LMDB dataset for {_env_name} doesn't exist")
+        #         env = None
 
-        with env.begin(write=False, buffers=True) as txn:
-            buf = txn.get(key.encode())
-            arr = np.frombuffer(buf, dtype='uint16')
-        cell_image = arr.reshape((self.num_channels, self.crop_size, self.crop_size))
+        # with env.begin(write=False, buffers=True) as txn:
+        #     buf = txn.get(key.encode())
+        #     arr = np.frombuffer(buf, dtype='uint16')
+        # cell_image = arr.reshape((self.num_channels, self.crop_size, self.crop_size))
 
+        cell_image = io.imread(key)
         if self.batch_correction:
             batch = plate+well
             cell_image = (cell_image - self.per_well_median[batch])/self.per_well_MAD[batch]
@@ -104,9 +106,10 @@ class OPSdataset(Dataset):
     def __getitem__(self, idx):
         'Generates one sample of data'
         image = self.read_single_cell_image(idx)
+        uid = self.df.iloc[idx]["id"]
         if self.preprocess:
             image = self.preprocess(image=image)
-        return image
+        return image, uid
         
 class OPSwithlabel(OPSdataset):
     def __init__(self, metadata_df, *args, **kwargs):
@@ -124,7 +127,8 @@ class OPSwithlabel(OPSdataset):
         image = self.read_single_cell_image(idx)
         label = self.read_single_cell_label(idx, self.label)
         image, label = self.preprocess(image=image, label=label)
-        return image, label
+        uid = self.df.iloc[idx]["id"]
+        return image, label, uid
 
 class PairedDataset(Dataset):
     def __init__(self, background_ds, target_ds):
@@ -133,21 +137,45 @@ class PairedDataset(Dataset):
         self.length = max(len(background_ds), len(target_ds))
 
     def __getitem__(self, index):
-        return self.build_pair(self.background_ds[index % len(self.background_ds)], 
-                               self.target_ds[index % len(self.target_ds)])
+        return self.build_pair(self.background_ds[index % len(self.background_ds)],self.target_ds[index % len(self.target_ds)])
             
     def __len__(self):
         return self.length
-    
+
     @staticmethod
     def build_pair(bg_samples, tg_samples):
-        if len(bg_samples) == 2:
-            bg_x, bg_y = bg_samples
-            tg_x, tg_y = tg_samples
+        """
+        Builds a paired dictionary containing background and target data, their labels, 
+        batches, and IDs.
+        """
+        if len(bg_samples) == 3:
+            bg_x, bg_y, id_bg = bg_samples
+            tg_x, tg_y, id_tg = tg_samples
             if len(bg_y) == 1:
-                return {'background': bg_x, 'target': tg_x, 'background_label': bg_y, 'target_label':tg_y}
+                return {
+                    'background': bg_x,
+                    'target': tg_x,
+                    'background_label': bg_y,
+                    'target_label': tg_y,
+                    'background_id': id_bg,
+                    'target_id': id_tg
+                }
+            
             elif len(bg_y) == 2:
-                return {'background': bg_x, 'target': tg_x, 'background_label': bg_y[0], 
-                            'target_label': tg_y[0], 'background_batch': bg_y[1], 'target_batch': tg_y[1]}
+                return {
+                    'background': bg_x,
+                    'target': tg_x,
+                    'background_label': bg_y[0],
+                    'target_label': tg_y[0],
+                    'background_batch': bg_y[1],
+                    'target_batch': tg_y[1],
+                    'background_id': bg_samples.get("id"),
+                    'target_id': tg_samples.get("id")
+                }
         else:
-            return {'background': bg_samples, 'target': tg_samples}
+            return {
+                'background': bg_samples,
+                'target': tg_samples,
+                'background_id': bg_samples.get("id"),
+                'target_id': tg_samples.get("id")
+            }

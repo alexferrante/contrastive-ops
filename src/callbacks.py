@@ -1,4 +1,4 @@
-import wandb
+# import wandb
 import torch
 import torchvision
 from lightning.pytorch.callbacks import Callback
@@ -38,9 +38,9 @@ class ImagePredictionLogger(Callback):
             val_imgs = torch.cat(list(val_imgs.values()), dim=0) if type(val_imgs) is dict else val_imgs
             imgs = torch.stack([val_imgs, reconst_imgs], dim=1).flatten(0, 1)
             grid = torchvision.utils.make_grid(imgs, nrow=8, normalize=True, range=(-1, 1))
-            trainer.logger.experiment.log({"Reconstructions":
-                                           wandb.Image(grid, caption="Left: Input, Right: Output"),
-                                           "global_steps": trainer.global_step})
+            # trainer.logger.experiment.log({"Reconstructions":
+            #                                wandb.Image(grid, caption="Left: Input, Right: Output"),
+            #                                "global_steps": trainer.global_step})
 
 class EarlyStoppingOnTrainBatchEnd(Callback):   
     '''

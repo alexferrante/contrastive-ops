@@ -25,50 +25,62 @@ parser.add_argument("--model_name", type=str, default="ctvae")
 parser.add_argument("--optimizer", type=str, default="Adam")
 parser.add_argument("--lr", type=float, default=1e-3)
 parser.add_argument("--step_size", type=int, default=4500)
+parser.add_argument("--klscheduler", type=str, default='cyclic')
+parser.add_argument("--total_steps", type=int, default=3000)
 parser.add_argument("--max_kl_weight", type=float, default=1)
-parser.add_argument("--ngene", type=int, default=5050)
-parser.add_argument("--n_unique_batch", type=int, default=34)
-parser.add_argument("-w2", "--wasserstein_penalty", type=float, default=8)
+parser.add_argument("-w2", "--wasserstein_penalty", type=float, default=8) # for wass. loss
+
+# data settings
+parser.add_argument("--ngene", type=int, default=9314) # TODO 
+parser.add_argument("--image_size", type=int, default=64) # TODO: add padding to dataloder? 
+parser.add_argument("--center_crop", action='store_true') # False i.e. keep as is; don't want this augmentation
+
+parser.add_argument("--module", type=str, default='contrastive')
 parser.add_argument("-nz", "--n_z_latent", type=int, default=32)
 parser.add_argument("-ns", "--n_s_latent", type=int, default=32)
-parser.add_argument("--n_technical_latent", type=int, default=0)
-parser.add_argument("--batch_latent_dim", type=int, default=32)
-parser.add_argument("--BatchNorm", type=str, default=None)
-parser.add_argument("--base_channel_size", type=int, default=32)
-parser.add_argument("--model", type=str, default=None)
-parser.add_argument("--scale_factor", type=float, default=0.1)
-parser.add_argument("--disentangle", action='store_true')
+parser.add_argument("--latent_dim", type=int, default=64)
+
+# for batch-specific latent
+parser.add_argument("--batch_latent_dim", type=int, default=0) # 0
+parser.add_argument("--n_unique_batch", type=int, default=0) # 0; only used if batch_latent_dim > 0
+
+# enc/dec settings
+parser.add_argument("--model", type=str, default=None) # str for enc/dec arch. 
+parser.add_argument("--base_channel_size", type=int, default=32) # first layer for enc. 
 parser.add_argument("--adjust_prior_s", action='store_true', default=True)
 parser.add_argument("--adjust_prior_z", action='store_true', default=True)
+
+# unused model settings
+parser.add_argument("--BatchNorm", type=str, default=None)
+parser.add_argument("--n_technical_latent", type=int, default=0)
+parser.add_argument("--scale_factor", type=float, default=0.1)
+parser.add_argument("--disentangle", action='store_true')
 parser.add_argument("--classify_s", action='store_true')
 parser.add_argument("--classify_z", action='store_true')
 parser.add_argument("-cw", "--classification_weight", type=float, default=1)
 parser.add_argument("--tc_penalty", type=float, default=1)
-parser.add_argument("--center_crop", action='store_true')
-parser.add_argument("--image_size", type=int, default=64)
 parser.add_argument("--reg_type", type=str, default=None)
-parser.add_argument("--klscheduler", type=str, default='cyclic')
-parser.add_argument("--total_steps", type=int, default=3000)
-parser.add_argument("--latent_dim", type=int, default=64)
-parser.add_argument("--module", type=str, default='contrastive')
 
-parser.add_argument("--project", type=str, default="ops-training")
-parser.add_argument("-l", "--log_model", type=str, default='all')
+# logger settings
+parser.add_argument("--project", type=str, default="ops-training") # seems specific to wandb
+parser.add_argument("-l", "--log_model", type=str, default='all') # seems specific to wandb
+
 parser.add_argument("--subname", type=str, default="")
-parser.add_argument("--save_dir", type=str, default="/home/wangz222/scratch/")
+parser.add_argument("--save_dir", type=str, default="/data/aferrant/contrastive-ops/logging")
 
-parser.add_argument("--dataset_path_ntc", type=str, default='/projects/site/gred/resbioai/comp_vision/cellpaint-ai/ops/datasets/funk22/funk22_lmdb_shuffled/ntc') # Will be derived from root
-parser.add_argument("--dataset_path_perturbed", type=str, default='/projects/site/gred/resbioai/comp_vision/cellpaint-ai/ops/datasets/funk22/funk22_lmdb_shuffled/perturbed') # Will be derived from root
-parser.add_argument("--plate_list", type=str, nargs='+', default=['20200202_6W-LaC024A', '20200202_6W-LaC024D', '20200202_6W-LaC024E', '20200202_6W-LaC024F', '20200206_6W-LaC025A', '20200206_6W-LaC025B'])
+parser.add_argument("--dataset_path_ntc", type=str, default='/data/aferrant/contrastive-ops/ntc')
+parser.add_argument("--dataset_path_perturbed", type=str, default='/data/aferrant/contrastive-ops/perturbed')
+
+parser.add_argument("--plate_list", type=str, nargs='+', default=['']) # TODO
 parser.add_argument("--test_ratio", type=float, nargs='+', default=[0.83,0.02,0.15])
-parser.add_argument("--save_data_dir", type=str, default="/home/wangz222/scratch/splits_shuffled")
-parser.add_argument("--batch_size", type=int, default=1024)
+parser.add_argument("--save_data_dir", type=str, default="/data/aferrant/contrastive-ops/splits_shuffled") # where perturbed_filtered.pkl / ntc_filtered.pkl live
+parser.add_argument("--batch_size", type=int, default=32)
 parser.add_argument("--num_workers", type=int, default=8)
-parser.add_argument("--batch_correction", action='store_true')
-parser.add_argument("--label", type=str, nargs='*', default=[Column.gene.value, Column.batch.value])
-parser.add_argument("--stat_path", type=str, default="/home/wangz222/data/per_well_robust_stat.pkl")
+parser.add_argument("--batch_correction", action='store_true') # default? 
+parser.add_argument("--label", type=str, nargs='*', default=[Column.gene.value]) # label for ...?
+parser.add_argument("--stat_path", type=str, default="/data/aferrant/contrastive-ops/out/per_well_robust_stat.pkl") # 
 
-parser.add_argument("--max_epochs", type=int, default=2)
+parser.add_argument("--max_epochs", type=int, default=10)
 parser.add_argument("--gradient_clip_val", type=float, default=0.5)
 parser.add_argument("--log_every_n_steps", type=int, default=20)
 parser.add_argument("--gradient_clip_algorithm", type=str, default="value")
@@ -126,7 +138,7 @@ data_param = {
                 "save_dir": args.save_data_dir,
                 "loader_param": {"batch_size": args.batch_size, "num_workers": args.num_workers},
                 "batch_correction": args.batch_correction,
-                "label": [Column.gene.value, Column.batch.value], #put batch at the end if using it
+                "label": [Column.gene.value], #put batch at the end if using it
                 "stat_path": args.stat_path, #used for batch correction
                 }
 train_param = {
@@ -193,7 +205,6 @@ def train():
     dm.prepare_data()
     dm.setup(stage='fit')
     example_img = get_images(8, dm.val_dataloader(), data_param['transform'])
-
 
     # need to figure out logging...
 

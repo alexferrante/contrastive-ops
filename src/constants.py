@@ -21,15 +21,15 @@ class Column(Enum):
     plate = 'plate'
     well = 'well'
     tile = 'tile'
-    sgRNA = 'sgRNA_0'
-    gene = 'gene_symbol_0'
+    sgRNA = 'sgRNA'
+    gene = 'gene_symbol_simple'
     cell_y = 'cell_i'
     cell_x = 'cell_j'
     cell_cycle_stage = 'stage'
     batch = 'batch'
     uid = 'id'
     function = 'function'
-    image_path = 'single_cell_image'
+    image_path = 'image_masked_path'
 
 class cell_cycle(Enum):
     mitotic = 'mitotic'
