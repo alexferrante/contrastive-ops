@@ -70,13 +70,18 @@ class DataAugmentation(nn.Module):
 class ContrastiveDataAugmentation(nn.Module):
     """Module to perform data augmentation using Kornia on torch tensors."""
 
-    def __init__(self, transform) -> None:
+    def __init__(self, transform, select_ch=None) -> None:
         super().__init__()
         self.transforms = transform
+        self.select_ch = select_ch
 
     @torch.no_grad()  # disable gradients for effiency
     def forward(self, x: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        x['background'] = self.transforms(x['background'])
-        x['target'] = self.transforms(x['target'])
+        if self.select_ch is not None and x["background"].shape[1] > self.select_ch:
+            x['background'] = self.transforms(x['background'][:,self.select_ch:self.select_ch+1,:,:])
+            x['target'] = self.transforms(x['target'][:,self.select_ch:self.select_ch+1,:,:])
+        else: 
+            x['background'] = self.transforms(x['background'])
+            x['target'] = self.transforms(x['target'])
         return x
     
