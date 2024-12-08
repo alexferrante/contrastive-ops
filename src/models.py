@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import warnings
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
-from inv_model_utils import make_block, RotationModule
+from src.inv_model_utils import make_block, RotationModule
 
 import escnn
 from escnn import gspaces
@@ -41,6 +41,7 @@ class Encoder(torch.nn.Module):
                  latent_dim: int, 
                  num_input_channels: int, 
                  base_channel_size: int, 
+                 apply_init_scale: bool,
                  variational: bool=False,
                  label_latent_dim: int=0,
                  BatchNorm = None,
@@ -63,176 +64,236 @@ class Encoder(torch.nn.Module):
         self.model = model
         self.latent_dim = latent_dim
         c_hid = base_channel_size
-        if model == 'uhler':
-            self.net = nn.Sequential(
-                nn.Conv2d(num_input_channels, c_hid, 4, 2, 1, bias=False),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(c_hid, c_hid * 2, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(c_hid * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(c_hid * 2, c_hid * 4, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(c_hid * 4),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(c_hid * 4, c_hid * 8, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(c_hid * 8),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(c_hid * 8, c_hid * 8, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(c_hid * 8),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Flatten(),  # Image grid to single feature vector
-            )
-        elif model == 'test':
-            self.net = nn.Sequential(
-                nn.Conv2d(num_input_channels, c_hid, kernel_size=4, stride=2, padding=1, bias=False),  # 96x96 => 48x48
-                nn.LayerNorm([c_hid, 48, 48]),
-                nn.GELU(),
-                nn.Conv2d(c_hid, c_hid * 2, kernel_size=4, stride=2, padding=1, bias=False),  # 48x48 => 24x24
-                nn.LayerNorm([c_hid * 2, 24, 24]),
-                nn.GELU(),
-                nn.Conv2d(c_hid * 2, c_hid * 4, kernel_size=3, stride=2, padding=1, bias=False),  # 24x24 => 12x12
-                nn.LayerNorm([c_hid * 4, 12, 12]),
-                nn.GELU(),
-                nn.Conv2d(c_hid * 4, c_hid * 8, kernel_size=3, stride=2, padding=1, bias=False),  # 12x12 => 6x6
-                nn.LayerNorm([c_hid * 8, 6, 6]),
-                nn.GELU(),
-                nn.Conv2d(c_hid * 8, c_hid * 8, kernel_size=3, stride=2, padding=1, bias=False),  # 6x6 => 3x3
-                nn.LayerNorm([c_hid * 8, 3, 3]),
-                nn.GELU(),
-                nn.Flatten()  # Image grid to single feature vector
-            )
-        elif "multich" in model:
-            spatial_dims = 2
-            num_res_units = 1
-
-            channels = [16,32,64,128]
-            strides = [1,1,2,2]
-            kernel_sizes = [3]*4
-            padding = [None]*4
-            if model == "so2_multich":
-                self.gspace = (
-                    gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
+        if model is not None:
+            if model == 'uhler':
+                self.net = nn.Sequential(
+                    nn.Conv2d(num_input_channels, c_hid, 4, 2, 1, bias=False),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(c_hid, c_hid * 2, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(c_hid * 2),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(c_hid * 2, c_hid * 4, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(c_hid * 4),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(c_hid * 4, c_hid * 8, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(c_hid * 8),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(c_hid * 8, c_hid * 8, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(c_hid * 8),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Flatten(),  # Image grid to single feature vector
                 )
+            elif model == 'test':
+                self.net = nn.Sequential(
+                    nn.Conv2d(num_input_channels, c_hid, kernel_size=4, stride=2, padding=1, bias=False),  # 96x96 => 48x48
+                    nn.LayerNorm([c_hid, 48, 48]),
+                    nn.GELU(),
+                    nn.Conv2d(c_hid, c_hid * 2, kernel_size=4, stride=2, padding=1, bias=False),  # 48x48 => 24x24
+                    nn.LayerNorm([c_hid * 2, 24, 24]),
+                    nn.GELU(),
+                    nn.Conv2d(c_hid * 2, c_hid * 4, kernel_size=3, stride=2, padding=1, bias=False),  # 24x24 => 12x12
+                    nn.LayerNorm([c_hid * 4, 12, 12]),
+                    nn.GELU(),
+                    nn.Conv2d(c_hid * 4, c_hid * 8, kernel_size=3, stride=2, padding=1, bias=False),  # 12x12 => 6x6
+                    nn.LayerNorm([c_hid * 8, 6, 6]),
+                    nn.GELU(),
+                    nn.Conv2d(c_hid * 8, c_hid * 8, kernel_size=3, stride=2, padding=1, bias=False),  # 6x6 => 3x3
+                    nn.LayerNorm([c_hid * 8, 3, 3]),
+                    nn.GELU(),
+                    nn.Flatten()  # Image grid to single feature vector
+                )
+            elif "multich" in model:
+                spatial_dims = 2
+                num_res_units = 1
+    
+                channels = [16,32,64,128]
+                strides = [1,1,2,2]
+                kernel_sizes = [3]*4
+                padding = [None]*4
+                if model == "so2_multich":
+                    self.gspace = (
+                        gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
+                    )
+                    n_out_vectors = 1
+                else:
+                    self.gspace = (
+                        gspaces.trivialOnR2()
+                    )
+                    n_out_vectors = 0
+    
+                self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
+    
+                blocks = [ # (B, 48, input_spatial_dim, input_spatial_dim)
+                    make_block(
+                        in_type=self.in_type,
+                        out_channels=channels[0],
+                        stride=strides[0],
+                        kernel_size=kernel_sizes[0],
+                        padding=padding[0],
+                        spatial_dims=spatial_dims,
+                        num_res_units=num_res_units,
+                        padding_mode="replicate",
+                        batch_norm=BatchNorm,
+                    )
+                ]
+                for c, s, k, p in zip(channels[1:], strides[1:], kernel_sizes[1:], padding[1:]):
+                    blocks.append(make_block(blocks[-1].out_type, 
+                                             out_channels=c, 
+                                             stride=s, 
+                                             kernel_size=k, 
+                                             padding=p, 
+                                             spatial_dims=spatial_dims, 
+                                             num_res_units=num_res_units,
+                                             batch_norm=BatchNorm))
+    
+                
+                blocks.append(
+                    make_block(
+                        blocks[-1].out_type,
+                        out_channels=latent_dim*2,  # encoder out size ? need to tweak for varational version 
+                        stride=1,
+                        kernel_size=1,
+                        padding=0,
+                        spatial_dims=spatial_dims,
+                        num_res_units=num_res_units,
+                        batch_norm=False,
+                        activation=False,
+                        last_conv=True,
+                        out_vector_channels=n_out_vectors
+                    )
+                )
+    
+                # (B, 48, 69, 69)
+                # (B, 96, 69, 69)
+                # (B, 192, 35, 35)
+                # (B, 384, 18, 18)
+                # (B, 34, 18, 18)
+    
+                self.net = escnn.nn.SequentialModule(*blocks)
+            elif "singlech" in model:
+                spatial_dims = 2
+                num_res_units = 1
+                channels = [8, 16, 32, 64]
+                strides = [1, 1, 2, 2]
+                kernel_sizes = [3]*4
+                padding = [None]*4
+                
+                if model == "so2_singlech":
+                    self.gspace = (
+                        gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
+                    )
+                    n_out_vectors = 1
+                else:
+                    self.gspace = (
+                        gspaces.trivialOnR2()
+                    )
+                    n_out_vectors = 0
+    
+                self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
+    
+                blocks = [ # (B, 48, input_spatial_dim, input_spatial_dim)
+                    make_block(
+                        in_type=self.in_type,
+                        out_channels=channels[0],
+                        stride=strides[0],
+                        kernel_size=kernel_sizes[0],
+                        padding=padding[0],
+                        spatial_dims=spatial_dims,
+                        num_res_units=num_res_units,
+                        padding_mode="replicate",
+                    )
+                ]
+                for c, s, k, p in zip(channels[1:], strides[1:], kernel_sizes[1:], padding[1:]):
+                    blocks.append(make_block(blocks[-1].out_type, 
+                                             out_channels=c, 
+                                             stride=s, 
+                                             kernel_size=k, 
+                                             padding=p, 
+                                             spatial_dims=spatial_dims, 
+                                             num_res_units=num_res_units))
+    
+                
+                blocks.append(
+                    make_block(
+                        blocks[-1].out_type,
+                        out_channels=latent_dim*2,  # encoder out size ? need to tweak for varational version 
+                        stride=1,
+                        kernel_size=1,
+                        padding=0,
+                        spatial_dims=spatial_dims,
+                        num_res_units=num_res_units,
+                        batch_norm=False,
+                        activation=False,
+                        last_conv=True,
+                        out_vector_channels=n_out_vectors
+                    )
+                )
+    
+                # (B, 48, 69, 69)
+                # (B, 96, 69, 69)
+                # (B, 192, 35, 35)
+                # (B, 384, 18, 18)
+                # (B, 34, 18, 18)
+    
+                self.net = escnn.nn.SequentialModule(*blocks)
+            elif model == "so2_paper":
+                from inv_model_utils import Convolution
+                
+                self.gspace = (
+                        gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
+                    )
+                self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
                 n_out_vectors = 1
-            else:
-                self.gspace = (
-                    gspaces.trivialOnR2()
-                )
-                n_out_vectors = 0
-
-            self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
-
-            blocks = [ # (B, 48, input_spatial_dim, input_spatial_dim)
-                make_block(
-                    in_type=self.in_type,
-                    out_channels=channels[0],
-                    stride=strides[0],
-                    kernel_size=kernel_sizes[0],
-                    padding=padding[0],
-                    spatial_dims=spatial_dims,
-                    num_res_units=num_res_units,
-                    padding_mode="replicate",
-                )
-            ]
-            for c, s, k, p in zip(channels[1:], strides[1:], kernel_sizes[1:], padding[1:]):
-                blocks.append(make_block(blocks[-1].out_type, 
-                                         out_channels=c, 
-                                         stride=s, 
-                                         kernel_size=k, 
-                                         padding=p, 
-                                         spatial_dims=spatial_dims, 
-                                         num_res_units=num_res_units))
-
-            
-            blocks.append(
-                make_block(
-                    blocks[-1].out_type,
-                    out_channels=latent_dim*2,  # encoder out size ? need to tweak for varational version 
-                    stride=1,
-                    kernel_size=1,
-                    padding=0,
-                    spatial_dims=spatial_dims,
-                    num_res_units=num_res_units,
-                    batch_norm=False,
-                    activation=False,
-                    last_conv=True,
-                    out_vector_channels=n_out_vectors
-                )
-            )
-
-            # (B, 48, 69, 69)
-            # (B, 96, 69, 69)
-            # (B, 192, 35, 35)
-            # (B, 384, 18, 18)
-            # (B, 34, 18, 18)
-
-            self.net = escnn.nn.SequentialModule(*blocks)
-        elif "singlech" in model:
-            spatial_dims = 2
-            num_res_units = 1
-            channels = [8, 16, 32, 64]
-            strides = [1, 1, 2, 2]
-            kernel_sizes = [3]*4
-            padding = [None]*4
-            
-            if model == "so2_singlech":
-                self.gspace = (
-                    gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
-                )
-                n_out_vectors = 1
-            else:
-                self.gspace = (
-                    gspaces.trivialOnR2()
-                )
-                n_out_vectors = 0
-
-            self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
-
-            blocks = [ # (B, 48, input_spatial_dim, input_spatial_dim)
-                make_block(
-                    in_type=self.in_type,
-                    out_channels=channels[0],
-                    stride=strides[0],
-                    kernel_size=kernel_sizes[0],
-                    padding=padding[0],
-                    spatial_dims=spatial_dims,
-                    num_res_units=num_res_units,
-                    padding_mode="replicate",
-                )
-            ]
-            for c, s, k, p in zip(channels[1:], strides[1:], kernel_sizes[1:], padding[1:]):
-                blocks.append(make_block(blocks[-1].out_type, 
-                                         out_channels=c, 
-                                         stride=s, 
-                                         kernel_size=k, 
-                                         padding=p, 
-                                         spatial_dims=spatial_dims, 
-                                         num_res_units=num_res_units))
-
-            
-            blocks.append(
-                make_block(
-                    blocks[-1].out_type,
-                    out_channels=latent_dim*2,  # encoder out size ? need to tweak for varational version 
-                    stride=1,
-                    kernel_size=1,
-                    padding=0,
-                    spatial_dims=spatial_dims,
-                    num_res_units=num_res_units,
-                    batch_norm=False,
-                    activation=False,
-                    last_conv=True,
-                    out_vector_channels=n_out_vectors
-                )
-            )
-
-            # (B, 48, 69, 69)
-            # (B, 96, 69, 69)
-            # (B, 192, 35, 35)
-            # (B, 384, 18, 18)
-            # (B, 34, 18, 18)
-
-            self.net = escnn.nn.SequentialModule(*blocks)
-            
+                
+                blocks = [
+                    Convolution(spatial_dims=2,
+                                in_type=self.in_type,
+                                out_channels=c_hid, 
+                                kernel_size=3, 
+                                padding=1, 
+                                stride=2,
+                                batch_norm=False,
+                                activation=True)]
+                blocks.append(
+                    Convolution(spatial_dims=2,
+                                in_type=blocks[-1].out_type,
+                                out_channels=c_hid, 
+                                kernel_size=3, 
+                                padding=1, 
+                                stride=1,
+                                batch_norm=False,
+                                activation=True))  # 64x64 => ? 32x32
+                blocks.append(
+                    Convolution(spatial_dims=2,
+                                in_type=blocks[-1].out_type,
+                                out_channels=2*c_hid, 
+                                kernel_size=3, 
+                                padding=1, 
+                                stride=2,
+                                batch_norm=False,
+                                activation=True)) # 64x64 => ? 32x32
+                blocks.append(
+                    Convolution(spatial_dims=2,
+                                in_type=blocks[-1].out_type,
+                                out_channels=2*c_hid, 
+                                kernel_size=3, 
+                                padding=1, 
+                                stride=1,
+                                batch_norm=False,
+                                activation=True))  # 64x64 => ? 32x32
+                blocks.append(
+                    Convolution(spatial_dims=2,
+                                in_type=blocks[-1].out_type,
+                                out_channels=2*c_hid, 
+                                kernel_size=3, 
+                                padding=1, 
+                                stride=2,
+                                batch_norm=False,
+                                activation=True, 
+                                out_vector_channels=1))  # 64x64 => ? 32x32
+                    # nn.Flatten(),  # Image grid to single feature vector
+                 #TODO how to handle flat? prob just pool? 
+                self.net = escnn.nn.SequentialModule(*blocks)
         else:
             if width == 96:
                 self.net = nn.Sequential(
@@ -264,11 +325,12 @@ class Encoder(torch.nn.Module):
                     act_fn(),
                     nn.Flatten(),  # Image grid to single feature vector
                 )
-        apply_scaled_init(self.net)
+        if apply_init_scale:
+            apply_scaled_init(self.net)
         
         if self.variational:
             if model is not None:
-                if model in ["multich", "so2_multich", "singlech", "so2_singlech"]:
+                if model in ["multich", "so2_multich", "singlech", "so2_singlech", "so2_paper"]:
                     self.fc_mu = None
                     self.fc_log_var = None
                 else:
@@ -285,30 +347,31 @@ class Encoder(torch.nn.Module):
         else:
             self.net = nn.Sequential(self.net, nn.Linear(input_size, latent_dim))
 
-        if self.fc_mu is not None:
+        if self.fc_mu is not None and apply_init_scale:
             apply_scaled_init(self.fc_mu)
             apply_scaled_init(self.fc_log_var)
 
     def forward(self, x, **kwargs):
         if self.variational:
-            if "multich" in self.model or "singlech" in self.model:
-                x = escnn.nn.GeometricTensor(x, self.in_type)
-                y = self.net(x)
-                pool_dims = (2, 3)
-                y = y.tensor
-                y = y.mean(dim=pool_dims)
-                y_embedding = y[:, :self.latent_dim*2]
-                mu = y_embedding[:,:self.latent_dim]
-                log_var = y_embedding[:, self.latent_dim:]
-                if "so2" in self.model:
-                    y_pose = y[:,self.latent_dim*2:]
-                    y_pose = y_pose[:, [1, 0]]
-                    y_pose = y_pose / (
-                            torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8
-                        ) # (B, 2)
-                    return mu, log_var, y_pose
-                else:
-                    return mu, log_var
+            if self.model is not None:
+                if "multich" in self.model or "singlech" in self.model or "so2" in self.model:
+                    x = escnn.nn.GeometricTensor(x, self.in_type)
+                    y = self.net(x)
+                    pool_dims = (2, 3)
+                    y = y.tensor
+                    y = y.mean(dim=pool_dims)
+                    y_embedding = y[:, :self.latent_dim*2]
+                    mu = y_embedding[:,:self.latent_dim]
+                    log_var = y_embedding[:, self.latent_dim:]
+                    if "so2" in self.model:
+                        y_pose = y[:,self.latent_dim*2:]
+                        y_pose = y_pose[:, [1, 0]]
+                        y_pose = y_pose / (
+                                torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8
+                            ) # (B, 2)
+                        return mu, log_var, y_pose
+                    else:
+                        return mu, log_var
             else:
                 x = self.net(x)
                 mu = self.fc_mu(x)
@@ -323,6 +386,7 @@ class Decoder(torch.nn.Module):
                  latent_dim: int, 
                  num_input_channels: int, 
                  base_channel_size: int, 
+                 apply_init_scale: bool,
                  batch_latent_dim: int=0,
                  BatchNorm = None,
                  act_fn: object = nn.GELU,
@@ -340,160 +404,179 @@ class Decoder(torch.nn.Module):
         """
         super().__init__()
         c_hid = base_channel_size
+        if model is not None:
+            if model == 'uhler':
+                print('using uhler decoder')
+                self.linear = nn.Sequential(
+                    nn.Linear(latent_dim + batch_latent_dim, 2 * 6 * 6 * c_hid), 
+                    act_fn(),
+                    nn.Unflatten(1, (2 * c_hid, 6, 6)),
+                )
+                self.net = nn.Sequential(
+                    nn.ConvTranspose2d(c_hid * 8, c_hid * 8, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(c_hid * 8),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.ConvTranspose2d(c_hid * 8, c_hid * 4, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(c_hid * 4),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.ConvTranspose2d(c_hid * 4, c_hid * 2, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(c_hid * 2),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.ConvTranspose2d(c_hid * 2, c_hid, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(c_hid),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.ConvTranspose2d(c_hid, num_input_channels, 4, 2, 1, bias=False),
+                    nn.Tanh(),
+            )
+            elif model == 'test':
+                print('using test decoder')
+                self.linear = nn.Sequential(
+                    nn.Linear(latent_dim + batch_latent_dim, 8 * 3 * 3 * c_hid),
+                    nn.LayerNorm(8 * 3 * 3 * c_hid),
+                    act_fn(),
+                    nn.Unflatten(1, (8 * c_hid, 3, 3)), 
+                )
+    
+                self.net = nn.Sequential(
+                    nn.ConvTranspose2d(8 * c_hid, 4 * c_hid, kernel_size=4, padding=1, stride=2), # 3x3 => 6x6
+                    nn.LayerNorm([4 * c_hid, 6, 6]),
+                    act_fn(),
+                    nn.ConvTranspose2d(4 * c_hid, 2 * c_hid, kernel_size=4, padding=1, stride=2), # 6x6 => 12x12
+                    nn.LayerNorm([2 * c_hid, 12, 12]),
+                    act_fn(),
+                    nn.ConvTranspose2d(2 * c_hid, c_hid, kernel_size=3, output_padding=1, padding=1, stride=2), # 12x12 => 24x24
+                    nn.LayerNorm([c_hid, 24, 24]),
+                    act_fn(),
+                    nn.ConvTranspose2d(c_hid, c_hid // 2, kernel_size=5, output_padding=1, padding=2, stride=2), # 24x24 => 48x48, using a larger kernel
+                    nn.LayerNorm([c_hid // 2, 48, 48]),
+                    act_fn(),
+                    nn.ConvTranspose2d(c_hid // 2, num_input_channels, kernel_size=3, output_padding=1, padding=1, stride=2), # 48x48 => 96x96
+                    nn.Tanh(),
+                )
+            elif "multich" in model:
+                final_size = (18,18) # for LD 64 
+    
+                channels = [64, 32, 16, 6]
+                strides = [2, 2, 2]
         
-        if model == 'uhler':
-            print('using uhler decoder')
-            self.linear = nn.Sequential(
-                nn.Linear(latent_dim + batch_latent_dim, 2 * 6 * 6 * c_hid), 
-                act_fn(),
-                nn.Unflatten(1, (2 * c_hid, 6, 6)),
-            )
-            self.net = nn.Sequential(
-                nn.ConvTranspose2d(c_hid * 8, c_hid * 8, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(c_hid * 8),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(c_hid * 8, c_hid * 4, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(c_hid * 4),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(c_hid * 4, c_hid * 2, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(c_hid * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(c_hid * 2, c_hid, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(c_hid),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(c_hid, num_input_channels, 4, 2, 1, bias=False),
-                nn.Tanh(),
-        )
-        elif model == 'test':
-            print('using test decoder')
-            self.linear = nn.Sequential(
-                nn.Linear(latent_dim + batch_latent_dim, 8 * 3 * 3 * c_hid),
-                nn.LayerNorm(8 * 3 * 3 * c_hid),
-                act_fn(),
-                nn.Unflatten(1, (8 * c_hid, 3, 3)), 
-            )
+                decode_blocks = []
+                for i, (s, c_in, c_out) in enumerate(
+                    zip(strides, channels[:-1], channels[1:])
+                ):
+                    last_block = i + 1 == len(strides)
+        
+                    size = None if not last_block else (69, 69)
+        
+                    upsample = UpSample(
+                        spatial_dims=2,
+                        in_channels=c_in,
+                        out_channels=c_in,
+                        scale_factor=s,  # ignored if size isn't None, i.e. in the last bloc
+                        size=size,
+                        kernel_size=3,
+                        pre_conv=None,
+                        # choices inspired by this article:
+                        # https://distill.pub/2016/deconv-checkerboard/
+                        mode="nontrainable",
+                        interp_mode="nearest",
+                        align_corners=None,
+                    )
+        
+                    res = ResidualUnit(
+                        spatial_dims=2,
+                        in_channels=c_in,
+                        out_channels=c_out,
+                        strides=1,
+                        kernel_size=3,
+                        act="relu",
+                        norm="batch",
+                        dropout=None,
+                        subunits=1,
+                        padding=1,
+                    )
+        
+                    decode_blocks.append(nn.Sequential(upsample, res))
+        
+                self.linear = nn.Sequential(
+                    nn.Linear(latent_dim, channels[0] * int(np.product(final_size))),
+                    Reshape(channels[0], *final_size),
+                )
+        
+                self.net = nn.Sequential(
+                    *decode_blocks,
+                    nn.Identity(),
+                )
+            elif "singlech" in model:
+                final_size = (18,18)
+                channels = [64, 32, 16, 1]
+                strides = [2,2,2]
+    
+                decode_blocks = []
+                for i, (s, c_in, c_out) in enumerate(
+                    zip(strides, channels[:-1], channels[1:])
+                ):
+                    last_block = i + 1 == len(strides)
+        
+                    size = None if not last_block else (69, 69)
+        
+                    upsample = UpSample(
+                        spatial_dims=2,
+                        in_channels=c_in,
+                        out_channels=c_in,
+                        scale_factor=s,  # ignored if size isn't None, i.e. in the last bloc
+                        size=size,
+                        kernel_size=3,
+                        pre_conv=None,
+                        # choices inspired by this article:
+                        # https://distill.pub/2016/deconv-checkerboard/
+                        mode="nontrainable",
+                        interp_mode="nearest",
+                        align_corners=None,
+                    )
+        
+                    res = ResidualUnit(
+                        spatial_dims=2,
+                        in_channels=c_in,
+                        out_channels=c_out,
+                        strides=1,
+                        kernel_size=3,
+                        act="relu",
+                        norm="batch",
+                        dropout=None,
+                        subunits=1,
+                        padding=1,
+                    )
+        
+                    decode_blocks.append(nn.Sequential(upsample, res))
+        
+                self.linear = nn.Sequential(
+                    nn.Linear(latent_dim, channels[0] * int(np.product(final_size))),
+                    Reshape(channels[0], *final_size),
+                )
+        
+                self.net = nn.Sequential(
+                    *decode_blocks,
+                    nn.Identity(),
+                )
+            elif "so2_paper" == model:
+                self.linear = nn.Sequential(
+                    nn.Linear(latent_dim + batch_latent_dim, 2 * 8 * 8 * c_hid), 
+                    act_fn(),
+                    nn.Unflatten(1, (-1, 8, 8)),
+                    )
+                self.net = nn.Sequential(
+                    nn.ConvTranspose2d(2 * c_hid, 2 * c_hid, kernel_size=3, output_padding=1, padding=1, stride=2),  # 8x8 => 16x16
+                    act_fn(),
+                    nn.Conv2d(2 * c_hid, 2 * c_hid, kernel_size=3, padding=1),
+                    act_fn(),
+                    nn.ConvTranspose2d(2 * c_hid, c_hid, kernel_size=3, output_padding=1, padding=0, stride=2),  # 16x16 => 34x34
+                    act_fn(),
+                    nn.Conv2d(c_hid, c_hid, kernel_size=3, padding=1),
+                    act_fn(),
+                    nn.ConvTranspose2d(c_hid, num_input_channels, kernel_size=3, output_padding=0, padding=0, stride=2),  # Adjusted for 34x34 => 69x69
+                    nn.Tanh(),
+                )
 
-            self.net = nn.Sequential(
-                nn.ConvTranspose2d(8 * c_hid, 4 * c_hid, kernel_size=4, padding=1, stride=2), # 3x3 => 6x6
-                nn.LayerNorm([4 * c_hid, 6, 6]),
-                act_fn(),
-                nn.ConvTranspose2d(4 * c_hid, 2 * c_hid, kernel_size=4, padding=1, stride=2), # 6x6 => 12x12
-                nn.LayerNorm([2 * c_hid, 12, 12]),
-                act_fn(),
-                nn.ConvTranspose2d(2 * c_hid, c_hid, kernel_size=3, output_padding=1, padding=1, stride=2), # 12x12 => 24x24
-                nn.LayerNorm([c_hid, 24, 24]),
-                act_fn(),
-                nn.ConvTranspose2d(c_hid, c_hid // 2, kernel_size=5, output_padding=1, padding=2, stride=2), # 24x24 => 48x48, using a larger kernel
-                nn.LayerNorm([c_hid // 2, 48, 48]),
-                act_fn(),
-                nn.ConvTranspose2d(c_hid // 2, num_input_channels, kernel_size=3, output_padding=1, padding=1, stride=2), # 48x48 => 96x96
-                nn.Tanh(),
-            )
-        elif "multich" in model:
-            final_size = (18,18) # for LD 64 
-
-            channels = [64, 32, 16, 6]
-            strides = [2, 2, 2]
-    
-            decode_blocks = []
-            for i, (s, c_in, c_out) in enumerate(
-                zip(strides, channels[:-1], channels[1:])
-            ):
-                last_block = i + 1 == len(strides)
-    
-                size = None if not last_block else (69, 69)
-    
-                upsample = UpSample(
-                    spatial_dims=2,
-                    in_channels=c_in,
-                    out_channels=c_in,
-                    scale_factor=s,  # ignored if size isn't None, i.e. in the last bloc
-                    size=size,
-                    kernel_size=3,
-                    pre_conv=None,
-                    # choices inspired by this article:
-                    # https://distill.pub/2016/deconv-checkerboard/
-                    mode="nontrainable",
-                    interp_mode="nearest",
-                    align_corners=None,
-                )
-    
-                res = ResidualUnit(
-                    spatial_dims=2,
-                    in_channels=c_in,
-                    out_channels=c_out,
-                    strides=1,
-                    kernel_size=3,
-                    act="relu",
-                    norm="batch",
-                    dropout=None,
-                    subunits=1,
-                    padding=1,
-                )
-    
-                decode_blocks.append(nn.Sequential(upsample, res))
-    
-            self.linear = nn.Sequential(
-                nn.Linear(latent_dim, channels[0] * int(np.product(final_size))),
-                Reshape(channels[0], *final_size),
-            )
-    
-            self.net = nn.Sequential(
-                *decode_blocks,
-                nn.Identity(),
-            )
-        elif "singlech" in model:
-            final_size = (18,18)
-            channels = [64, 32, 16, 1]
-            strides = [2,2,2]
-
-            decode_blocks = []
-            for i, (s, c_in, c_out) in enumerate(
-                zip(strides, channels[:-1], channels[1:])
-            ):
-                last_block = i + 1 == len(strides)
-    
-                size = None if not last_block else (69, 69)
-    
-                upsample = UpSample(
-                    spatial_dims=2,
-                    in_channels=c_in,
-                    out_channels=c_in,
-                    scale_factor=s,  # ignored if size isn't None, i.e. in the last bloc
-                    size=size,
-                    kernel_size=3,
-                    pre_conv=None,
-                    # choices inspired by this article:
-                    # https://distill.pub/2016/deconv-checkerboard/
-                    mode="nontrainable",
-                    interp_mode="nearest",
-                    align_corners=None,
-                )
-    
-                res = ResidualUnit(
-                    spatial_dims=2,
-                    in_channels=c_in,
-                    out_channels=c_out,
-                    strides=1,
-                    kernel_size=3,
-                    act="relu",
-                    norm="batch",
-                    dropout=None,
-                    subunits=1,
-                    padding=1,
-                )
-    
-                decode_blocks.append(nn.Sequential(upsample, res))
-    
-            self.linear = nn.Sequential(
-                nn.Linear(latent_dim, channels[0] * int(np.product(final_size))),
-                Reshape(channels[0], *final_size),
-            )
-    
-            self.net = nn.Sequential(
-                *decode_blocks,
-                nn.Identity(),
-            )
         else:
             if width == 96:
                 print('using width 96 decoder')
@@ -535,8 +618,9 @@ class Decoder(torch.nn.Module):
                     nn.ConvTranspose2d(c_hid, num_input_channels, kernel_size=3, output_padding=1, padding=1, stride=2),  # 32x32 => 64x64
                     nn.Tanh(),
                 )
-        apply_scaled_init(self.linear)
-        apply_scaled_init(self.net)
+        if apply_init_scale:
+            apply_scaled_init(self.linear)
+            apply_scaled_init(self.net)
 
 
     def forward(self, x, **kwargs):
@@ -758,6 +842,7 @@ class ContrastiveVAEmodel(BaseModel):
                  reg_type: str=None,
                  total_steps: int=3000,
                  klscheduler: str='cyclic',
+                 apply_init_scale: bool=True,
                  *args, 
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -792,9 +877,11 @@ class ContrastiveVAEmodel(BaseModel):
             self.kl_weight_scheduler = KLRampScheduler(total_steps=self.total_steps, max_weight=max_kl_weight)
 
         # Background encoder
+
         self.coder_param = {'num_input_channels': self.num_input_channels, "scale_factor": self.scale_factor, 
                          'base_channel_size': self.base_channel_size, 'variational': True, 'width': self.width, 'height':self.height,
-                          'BatchNorm': self.BatchNorm, 'n_unique_batch': self.n_unique_batch, 'model': self.model,}
+                          'BatchNorm': self.BatchNorm, 'n_unique_batch': self.n_unique_batch, 'model': self.model,
+                           'apply_init_scale': apply_init_scale}
         self.z_encoder = encoder_class(
                                        latent_dim=self.n_z_latent,
                                        **self.coder_param,
@@ -831,17 +918,14 @@ class ContrastiveVAEmodel(BaseModel):
             self.batch_embedding = torch.nn.Embedding(self.n_unique_batch, self.batch_latent_dim)
             self.example_input_array.update({'background_batch': torch.zeros(2, dtype=torch.int32),
                                             'target_batch': torch.zeros(2, dtype=torch.int32)})
-        kwargs["encoder_class"] = f"{encoder_class.__module__}.{encoder_class.__name__}"
-        kwargs["decoder_class"] = f"{decoder_class.__module__}.{decoder_class.__name__}"
-        kwargs = flatten_dict(kwargs)
-        if "so2" in model:
+        if model is not None and "so2" in model:
             self.rotation_module = RotationModule(
                 "so2", 2, 0, 1e-8
             )
         else:
             self.rotation_module = None
 
-        self.save_hyperparameters(kwargs)
+        self.save_hyperparameters()
 
     def forward(self, background, target, **kwargs):
         background_label = kwargs.get('background_label')
@@ -891,7 +975,7 @@ class ContrastiveVAEmodel(BaseModel):
         return torch.cat((qs_m, qz_m), dim=1)
 
     def _generic_inference(self, x: torch.Tensor):
-        if "so2" in self.model:
+        if self.model is not None and "so2" in self.model:
             qz_m, qz_lv, zpose = self.z_encoder(x)
             qs_m, qs_lv, spose = self.s_encoder(x)
         else:
