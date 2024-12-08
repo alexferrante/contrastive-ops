@@ -103,7 +103,6 @@ class Encoder(torch.nn.Module):
         elif "multich" in model:
             spatial_dims = 2
             num_res_units = 1
-            maximum_frequency = 8
 
             channels = [16,32,64,128]
             strides = [1,1,2,2]
@@ -111,7 +110,7 @@ class Encoder(torch.nn.Module):
             padding = [None]*4
             if model == "so2_multich":
                 self.gspace = (
-                    gspaces.rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)
+                    gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
                 )
                 n_out_vectors = 1
             else:
@@ -167,6 +166,73 @@ class Encoder(torch.nn.Module):
             # (B, 34, 18, 18)
 
             self.net = escnn.nn.SequentialModule(*blocks)
+        elif "singlech" in model:
+            spatial_dims = 2
+            num_res_units = 1
+            channels = [8, 16, 32, 64]
+            strides = [1, 1, 2, 2]
+            kernel_sizes = [3]*4
+            padding = [None]*4
+            
+            if model == "so2_singlech":
+                self.gspace = (
+                    gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
+                )
+                n_out_vectors = 1
+            else:
+                self.gspace = (
+                    gspaces.trivialOnR2()
+                )
+                n_out_vectors = 0
+
+            self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
+
+            blocks = [ # (B, 48, input_spatial_dim, input_spatial_dim)
+                make_block(
+                    in_type=self.in_type,
+                    out_channels=channels[0],
+                    stride=strides[0],
+                    kernel_size=kernel_sizes[0],
+                    padding=padding[0],
+                    spatial_dims=spatial_dims,
+                    num_res_units=num_res_units,
+                    padding_mode="replicate",
+                )
+            ]
+            for c, s, k, p in zip(channels[1:], strides[1:], kernel_sizes[1:], padding[1:]):
+                blocks.append(make_block(blocks[-1].out_type, 
+                                         out_channels=c, 
+                                         stride=s, 
+                                         kernel_size=k, 
+                                         padding=p, 
+                                         spatial_dims=spatial_dims, 
+                                         num_res_units=num_res_units))
+
+            
+            blocks.append(
+                make_block(
+                    blocks[-1].out_type,
+                    out_channels=latent_dim*2,  # encoder out size ? need to tweak for varational version 
+                    stride=1,
+                    kernel_size=1,
+                    padding=0,
+                    spatial_dims=spatial_dims,
+                    num_res_units=num_res_units,
+                    batch_norm=False,
+                    activation=False,
+                    last_conv=True,
+                    out_vector_channels=n_out_vectors
+                )
+            )
+
+            # (B, 48, 69, 69)
+            # (B, 96, 69, 69)
+            # (B, 192, 35, 35)
+            # (B, 384, 18, 18)
+            # (B, 34, 18, 18)
+
+            self.net = escnn.nn.SequentialModule(*blocks)
+            
         else:
             if width == 96:
                 self.net = nn.Sequential(
@@ -202,7 +268,7 @@ class Encoder(torch.nn.Module):
         
         if self.variational:
             if model is not None:
-                if model == "so2_multich":
+                if model in ["multich", "so2_multich", "singlech", "so2_singlech"]:
                     self.fc_mu = None
                     self.fc_log_var = None
                 else:
@@ -225,7 +291,7 @@ class Encoder(torch.nn.Module):
 
     def forward(self, x, **kwargs):
         if self.variational:
-            if "multich" in self.model:
+            if "multich" in self.model or "singlech" in self.model:
                 x = escnn.nn.GeometricTensor(x, self.in_type)
                 y = self.net(x)
                 pool_dims = (2, 3)
@@ -234,7 +300,7 @@ class Encoder(torch.nn.Module):
                 y_embedding = y[:, :self.latent_dim*2]
                 mu = y_embedding[:,:self.latent_dim]
                 log_var = y_embedding[:, self.latent_dim:]
-                if "so2_multich" == self.model:
+                if "so2" in self.model:
                     y_pose = y[:,self.latent_dim*2:]
                     y_pose = y_pose[:, [1, 0]]
                     y_pose = y_pose / (
@@ -325,6 +391,7 @@ class Decoder(torch.nn.Module):
             )
         elif "multich" in model:
             final_size = (18,18) # for LD 64 
+
             channels = [64, 32, 16, 6]
             strides = [2, 2, 2]
     
@@ -375,7 +442,58 @@ class Decoder(torch.nn.Module):
                 *decode_blocks,
                 nn.Identity(),
             )
-            
+        elif "singlech" in model:
+            final_size = (18,18)
+            channels = [64, 32, 16, 1]
+            strides = [2,2,2]
+
+            decode_blocks = []
+            for i, (s, c_in, c_out) in enumerate(
+                zip(strides, channels[:-1], channels[1:])
+            ):
+                last_block = i + 1 == len(strides)
+    
+                size = None if not last_block else (69, 69)
+    
+                upsample = UpSample(
+                    spatial_dims=2,
+                    in_channels=c_in,
+                    out_channels=c_in,
+                    scale_factor=s,  # ignored if size isn't None, i.e. in the last bloc
+                    size=size,
+                    kernel_size=3,
+                    pre_conv=None,
+                    # choices inspired by this article:
+                    # https://distill.pub/2016/deconv-checkerboard/
+                    mode="nontrainable",
+                    interp_mode="nearest",
+                    align_corners=None,
+                )
+    
+                res = ResidualUnit(
+                    spatial_dims=2,
+                    in_channels=c_in,
+                    out_channels=c_out,
+                    strides=1,
+                    kernel_size=3,
+                    act="relu",
+                    norm="batch",
+                    dropout=None,
+                    subunits=1,
+                    padding=1,
+                )
+    
+                decode_blocks.append(nn.Sequential(upsample, res))
+    
+            self.linear = nn.Sequential(
+                nn.Linear(latent_dim, channels[0] * int(np.product(final_size))),
+                Reshape(channels[0], *final_size),
+            )
+    
+            self.net = nn.Sequential(
+                *decode_blocks,
+                nn.Identity(),
+            )
         else:
             if width == 96:
                 print('using width 96 decoder')
@@ -754,7 +872,7 @@ class ContrastiveVAEmodel(BaseModel):
         tg = generative_outputs['target']["px_m"]
         if self.rotation_module is not None:
             # use inference_outputs["background"]["zpose"] or ["spose"] for pose adjust 
-            # TODO: somewhat arbitrarily choosing spose here...
+            # somewhat arbitrarily choosing spose here...
             bg = self.rotation_module(bg, inference_outputs["background"]["spose"])
             tg = self.rotation_module(tg, inference_outputs["target"]["spose"])
         
@@ -772,33 +890,41 @@ class ContrastiveVAEmodel(BaseModel):
         qs_m, _ = self.s_encoder(img)
         return torch.cat((qs_m, qz_m), dim=1)
 
-    def _generic_inference(self,
-                             x: torch.Tensor,
-                             ):
-        qz_m, qz_lv, zpose = self.z_encoder(x)
-        qs_m, qs_lv, spose = self.s_encoder(x)
+    def _generic_inference(self, x: torch.Tensor):
+        if "so2" in self.model:
+            qz_m, qz_lv, zpose = self.z_encoder(x)
+            qs_m, qs_lv, spose = self.s_encoder(x)
+        else:
+            qz_m, qz_lv = self.z_encoder(x)
+            qs_m, qs_lv = self.s_encoder(x)
+            zpose = None
+            spose = None
         
-        # sample from latent distribution
-        qz_lv = torch.maximum(qz_lv, torch.tensor(-20)) #clipping to prevent going to -inf
-        qs_lv = torch.maximum(qs_lv, torch.tensor(-20)) #clipping to prevent going to -inf
+        # Sample from latent distribution
+        qz_lv = torch.maximum(qz_lv, torch.tensor(-20))  # Clipping to prevent going to -inf
+        qs_lv = torch.maximum(qs_lv, torch.tensor(-20))  # Clipping to prevent going to -inf
         qz_s = torch.exp(qz_lv / 2)
         qs_s = torch.exp(qs_lv / 2)
         qz = Normal(qz_m, qz_s)
         qs = Normal(qs_m, qs_s)
         z = qz.rsample()
         s = qs.rsample()
-
-        outputs = dict(
-            qz_m=qz_m,
-            qz_s=qz_s,
-            z=z,
-            qs_m=qs_m,
-            qs_s=qs_s,
-            s=s,
-            zpose=zpose,
-            spose=spose)
-        return outputs
     
+        outputs = {
+            "qz_m": qz_m,
+            "qz_s": qz_s,
+            "z": z,
+            "qs_m": qs_m,
+            "qs_s": qs_s,
+            "s": s,
+        }
+    
+        if zpose is not None:
+            outputs["zpose"] = zpose
+        if spose is not None:
+            outputs["spose"] = spose
+        return outputs
+
     def inference(
             self,
             background: torch.Tensor,
