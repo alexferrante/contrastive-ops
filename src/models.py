@@ -323,11 +323,8 @@ class Decoder(torch.nn.Module):
                 nn.ConvTranspose2d(c_hid // 2, num_input_channels, kernel_size=3, output_padding=1, padding=1, stride=2), # 48x48 => 96x96
                 nn.Tanh(),
             )
-        elif model == "so2_multich":
-
-            padding = 1
+        elif "multich" in model:
             final_size = (18,18) # for LD 64 
-
             channels = [64, 32, 16, 6]
             strides = [2, 2, 2]
     
@@ -757,7 +754,7 @@ class ContrastiveVAEmodel(BaseModel):
         tg = generative_outputs['target']["px_m"]
         if self.rotation_module is not None:
             # use inference_outputs["background"]["zpose"] or ["spose"] for pose adjust 
-            # somewhat arbitrarily choosing spose here...
+            # TODO: somewhat arbitrarily choosing spose here...
             bg = self.rotation_module(bg, inference_outputs["background"]["spose"])
             tg = self.rotation_module(tg, inference_outputs["target"]["spose"])
         
