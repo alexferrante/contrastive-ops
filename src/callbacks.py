@@ -1,19 +1,21 @@
 # import wandb
 import torch
 import torchvision
+import os
 from lightning.pytorch.callbacks import Callback
 
 class ImagePredictionLogger(Callback):
     def __init__(self, val_samples, every_n_epochs=1):
         super().__init__()
-        self.val_imgs = val_samples  # Images to reconstruct during training
+        self.val_imgs = val_samples
         self.every_n_epochs = every_n_epochs
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if trainer.current_epoch % self.every_n_epochs == 0:
             # Reconstruct images
             if type(self.val_imgs) is dict:
-                val_imgs = {key: val.to(pl_module.device) for key, val in self.val_imgs.items()}
+                val_imgs = {key: (val.to(pl_module.device) if hasattr(val, "to") else val) for key, val in self.val_imgs.items()}
+                # val_imgs = {key: val.to(pl_module.device) for key, val in self.val_imgs.items()}
             elif type(self.val_imgs) is tuple:
                 val_imgs = (self.val_imgs[0].to(pl_module.device), self.val_imgs[1].to(pl_module.device))
             else:
@@ -38,6 +40,13 @@ class ImagePredictionLogger(Callback):
             val_imgs = torch.cat(list(val_imgs.values()), dim=0) if type(val_imgs) is dict else val_imgs
             imgs = torch.stack([val_imgs, reconst_imgs], dim=1).flatten(0, 1)
             grid = torchvision.utils.make_grid(imgs, nrow=8, normalize=True, range=(-1, 1))
+
+            for channel_idx in range(grid.shape[0]):  # Iterate over channels
+                single_channel = grid[channel_idx]  # Extract the single channel (286, 570)
+                single_channel = single_channel.unsqueeze(0)  # Add batch dimension (1, 286, 570)
+                save_path = os.path.join(trainer.logger.save_dir, f"recon_ch_{channel_idx}_step_{trainer.global_step}.png")
+                torchvision.utils.save_image(single_channel, save_path)
+                print(f"Saved grid for channel {channel_idx} at {save_path}")
             # trainer.logger.experiment.log({"Reconstructions":
             #                                wandb.Image(grid, caption="Left: Input, Right: Output"),
             #                                "global_steps": trainer.global_step})

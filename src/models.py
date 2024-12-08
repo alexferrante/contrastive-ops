@@ -2,11 +2,28 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 import lightning as L
-
+import numpy as np
 from typing import Dict, Tuple
 import warnings
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
+from inv_model_utils import make_block
+
+import escnn
+from escnn import gspaces
+from monai.networks.blocks import ResidualUnit, UpSample
+from monai.networks.layers.convutils import calculate_out_shape, same_padding
+from monai.networks.layers.simplelayers import Reshape
+
+def flatten_dict(d, parent_key='', sep='.'):
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 def apply_scaled_init(model):
     for m in model.modules():
@@ -19,7 +36,7 @@ def apply_scaled_init(model):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
     
-class Encoder(nn.Module):
+class Encoder(torch.nn.Module):
     def __init__(self, 
                  latent_dim: int, 
                  num_input_channels: int, 
@@ -43,6 +60,8 @@ class Encoder(nn.Module):
         """
         super().__init__()
         self.variational = variational
+        self.model = model
+        self.latent_dim = latent_dim
         c_hid = base_channel_size
         if model == 'uhler':
             self.net = nn.Sequential(
@@ -81,6 +100,67 @@ class Encoder(nn.Module):
                 nn.GELU(),
                 nn.Flatten()  # Image grid to single feature vector
             )
+        elif model == 'so2_multich':
+            spatial_dims = 2
+            num_res_units = 1
+            maximum_frequency = 8
+            n_out_vectors = 1
+
+            channels = [16,32,64,128]
+            strides = [1,1,2,2]
+            kernel_sizes = [3]*4
+            padding = [None]*4
+            
+            self.gspace = (
+                gspaces.rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)
+            )
+            self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
+
+            blocks = [ # (B, 48, input_spatial_dim, input_spatial_dim)
+                make_block(
+                    in_type=self.in_type,
+                    out_channels=channels[0],
+                    stride=strides[0],
+                    kernel_size=kernel_sizes[0],
+                    padding=padding[0],
+                    spatial_dims=spatial_dims,
+                    num_res_units=num_res_units,
+                    padding_mode="replicate",
+                )
+            ]
+            for c, s, k, p in zip(channels[1:], strides[1:], kernel_sizes[1:], padding[1:]):
+                blocks.append(make_block(blocks[-1].out_type, 
+                                         out_channels=c, 
+                                         stride=s, 
+                                         kernel_size=k, 
+                                         padding=p, 
+                                         spatial_dims=spatial_dims, 
+                                         num_res_units=num_res_units))
+
+            
+            blocks.append(
+                make_block(
+                    blocks[-1].out_type,
+                    out_channels=latent_dim*2,  # encoder out size ? need to tweak for varational version 
+                    stride=1,
+                    kernel_size=1,
+                    padding=0,
+                    spatial_dims=spatial_dims,
+                    num_res_units=num_res_units,
+                    batch_norm=False,
+                    activation=False,
+                    last_conv=True,
+                    out_vector_channels=1
+                )
+            )
+
+            # (B, 48, 69, 69)
+            # (B, 96, 69, 69)
+            # (B, 192, 35, 35)
+            # (B, 384, 18, 18)
+            # (B, 34, 18, 18)
+
+            self.net = escnn.nn.SequentialModule(*blocks)
         else:
             if width == 96:
                 self.net = nn.Sequential(
@@ -116,9 +196,13 @@ class Encoder(nn.Module):
         
         if self.variational:
             if model is not None:
-                input_size = c_hid * 8 * 3 * 3
-                self.fc_mu = nn.Linear(input_size, latent_dim)
-                self.fc_log_var = nn.Linear(input_size, latent_dim)
+                if model == "so2_multich":
+                    self.fc_mu = None
+                    self.fc_log_var = None
+                else:
+                    input_size = c_hid * 8 * 3 * 3
+                    self.fc_mu = nn.Linear(input_size, latent_dim)
+                    self.fc_log_var = nn.Linear(input_size, latent_dim)
             else:
                 if width == 96:
                     self.fc_mu = nn.Linear(2 * 6 * 6 * c_hid, latent_dim)
@@ -128,20 +212,33 @@ class Encoder(nn.Module):
                     self.fc_log_var = nn.Linear(2 * 8 * 8 * c_hid, latent_dim)
         else:
             self.net = nn.Sequential(self.net, nn.Linear(input_size, latent_dim))
-        apply_scaled_init(self.fc_mu)
-        apply_scaled_init(self.fc_log_var)
+
+        if self.fc_mu is not None:
+            apply_scaled_init(self.fc_mu)
+            apply_scaled_init(self.fc_log_var)
 
     def forward(self, x, **kwargs):
         if self.variational:
-            x = self.net(x)
-            mu = self.fc_mu(x)
-            log_var = self.fc_log_var(x)
-            return mu, log_var
+            if self.model == "so2_multich":
+                x = escnn.nn.GeometricTensor(x, self.in_type)
+                y = self.net(x)
+                pool_dims = (2, 3)
+                y = y.tensor
+                y = y.mean(dim=pool_dims)
+                y_embedding = y[:, :self.latent_dim*2]
+                mu = y_embedding[:,:self.latent_dim]
+                log_var = y_embedding[:, self.latent_dim:]
+                return mu, log_var
+            else:
+                x = self.net(x)
+                mu = self.fc_mu(x)
+                log_var = self.fc_log_var(x)
+                return mu, log_var
         else:
             x = self.net(x)
             return x
 
-class Decoder(nn.Module):
+class Decoder(torch.nn.Module):
     def __init__(self, 
                  latent_dim: int, 
                  num_input_channels: int, 
@@ -212,6 +309,62 @@ class Decoder(nn.Module):
                 nn.ConvTranspose2d(c_hid // 2, num_input_channels, kernel_size=3, output_padding=1, padding=1, stride=2), # 48x48 => 96x96
                 nn.Tanh(),
             )
+        elif model == "so2_multich":
+
+            padding = 1
+            final_size = (18,18) # for LD 64 
+
+            channels = [64, 32, 16, 6]
+            strides = [2, 2, 2]
+    
+            decode_blocks = []
+            for i, (s, c_in, c_out) in enumerate(
+                zip(strides, channels[:-1], channels[1:])
+            ):
+                last_block = i + 1 == len(strides)
+    
+                size = None if not last_block else (69, 69)
+    
+                upsample = UpSample(
+                    spatial_dims=2,
+                    in_channels=c_in,
+                    out_channels=c_in,
+                    scale_factor=s,  # ignored if size isn't None, i.e. in the last bloc
+                    size=size,
+                    kernel_size=3,
+                    pre_conv=None,
+                    # choices inspired by this article:
+                    # https://distill.pub/2016/deconv-checkerboard/
+                    mode="nontrainable",
+                    interp_mode="nearest",
+                    align_corners=None,
+                )
+    
+                res = ResidualUnit(
+                    spatial_dims=2,
+                    in_channels=c_in,
+                    out_channels=c_out,
+                    strides=1,
+                    kernel_size=3,
+                    act="relu",
+                    norm="batch",
+                    dropout=None,
+                    subunits=1,
+                    padding=1,
+                )
+    
+                decode_blocks.append(nn.Sequential(upsample, res))
+    
+            self.linear = nn.Sequential(
+                nn.Linear(latent_dim, channels[0] * int(np.product(final_size))),
+                Reshape(channels[0], *final_size),
+            )
+    
+            self.net = nn.Sequential(
+                *decode_blocks,
+                nn.Identity(),
+            )
+            
         else:
             if width == 96:
                 print('using width 96 decoder')
@@ -355,7 +508,7 @@ class VAEmodel(BaseModel):
         self.kl_weight_scheduler = CyclicWeightScheduler(step_size=step_size)
 
         # for the gaussian likelihood
-        self.log_scale = nn.Parameter(torch.Tensor([0.0]))
+        self.log_scale = torch.nn.Parameter(torch.Tensor([0.0]))
         self.encoder = encoder_class(variational=True, **self.network_param)
         self.decoder = decoder_class(**self.network_param)
         self.example_input_array = torch.zeros(2, self.num_input_channels, self.width, self.height)
@@ -532,12 +685,12 @@ class ContrastiveVAEmodel(BaseModel):
                                     )
         
         if self.adjust_prior_z:
-            self.zprior_embedding = nn.Embedding(self.ngene, self.n_z_latent)
+            self.zprior_embedding = torch.nn.Embedding(self.ngene, self.n_z_latent)
         if self.adjust_prior_s:
-            self.sprior_embedding = nn.Embedding(self.ngene, self.n_s_latent)
+            self.sprior_embedding = torch.nn.Embedding(self.ngene, self.n_s_latent)
     
         # for the gaussian likelihood
-        self.log_scale = nn.Parameter(torch.Tensor([0.0]))
+        self.log_scale = torch.nn.Parameter(torch.Tensor([0.0]))
 
         # Example input array needed for visualizing the graph of the network
         self.example_input_array = {'background': torch.zeros(2, self.num_input_channels, self.width, self.height),
@@ -546,11 +699,13 @@ class ContrastiveVAEmodel(BaseModel):
             self.example_input_array['background_label'] = torch.zeros(2, dtype=torch.int32)
             self.example_input_array['target_label'] = torch.zeros(2, dtype=torch.int32)
         if self.batch_latent_dim > 0:
-            self.batch_embedding = nn.Embedding(self.n_unique_batch, self.batch_latent_dim)
+            self.batch_embedding = torch.nn.Embedding(self.n_unique_batch, self.batch_latent_dim)
             self.example_input_array.update({'background_batch': torch.zeros(2, dtype=torch.int32),
                                             'target_batch': torch.zeros(2, dtype=torch.int32)})
-        # Saving hyperparameters of autoencoder
-        self.save_hyperparameters()
+        kwargs["encoder_class"] = f"{encoder_class.__module__}.{encoder_class.__name__}"
+        kwargs["decoder_class"] = f"{decoder_class.__module__}.{decoder_class.__name__}"
+        kwargs = flatten_dict(kwargs)
+        self.save_hyperparameters(kwargs)
 
     def forward(self, background, target, **kwargs):
         background_label = kwargs.get('background_label')
@@ -848,23 +1003,23 @@ class KLRampScheduler:
     def get_weight(self):
         return self.current_weight
     
-class LinearDiscriminator(nn.Module):
+class LinearDiscriminator(torch.nn.Module):
     def __init__(self, input_features):
         super(LinearDiscriminator, self).__init__()
-        self.linear = nn.Linear(input_features, 1)
-        self.sigmoid = nn.Sigmoid()
+        self.linear = torch.nn.Linear(input_features, 1)
+        self.sigmoid = torch.nn.Sigmoid()
 
     def forward(self, x):
         x = self.linear(x)
         x = self.sigmoid(x)
         return x
 
-class ConditionalBatchNorm1d(nn.Module):
+class ConditionalBatchNorm1d(torch.nn.Module):
     def __init__(self, num_features, num_classes):
         super().__init__()
         self.num_features = num_features
-        self.bn = nn.BatchNorm1d(num_features, affine=False)
-        self.embed = nn.Embedding(num_classes, num_features * 2)
+        self.bn = torch.nn.BatchNorm1d(num_features, affine=False)
+        self.embed = torch.nn.Embedding(num_classes, num_features * 2)
         self.embed.weight.data[:, :num_features].normal_(1, 0.02)  # Initialise scale at N(1, 0.02)
         self.embed.weight.data[:, num_features:].zero_()  # Initialise bias at 0
 
@@ -876,12 +1031,12 @@ class ConditionalBatchNorm1d(nn.Module):
         beta = beta.expand_as(out)
         return gamma * out + beta
     
-class ConditionalBatchNorm2d(nn.Module):
+class ConditionalBatchNorm2d(torch.nn.Module):
     def __init__(self, num_features, num_classes):
         super().__init__()
         self.num_features = num_features
-        self.bn = nn.BatchNorm2d(num_features, affine=False)
-        self.embed = nn.Embedding(num_classes, num_features * 2)
+        self.bn = torch.nn.BatchNorm2d(num_features, affine=False)
+        self.embed = torch.nn.Embedding(num_classes, num_features * 2)
         self.embed.weight.data[:, :num_features].normal_(1, 0.02)  # Initialise scale at N(1, 0.02)
         self.embed.weight.data[:, num_features:].zero_()  # Initialise bias at 0
 
@@ -893,41 +1048,41 @@ class ConditionalBatchNorm2d(nn.Module):
         beta = beta.unsqueeze(2).unsqueeze(3).expand_as(out)
         return gamma * out + beta
     
-def add_encoder_batch_norm(model, 
-                           BatchNorm, 
-                           n_conditions=None
-                           ):
-    new_layers = []
-    for layer in model:
-        new_layers.append(layer)
-        if isinstance(layer, nn.Conv2d):
-            if BatchNorm == ConditionalBatchNorm2d:
-                new_layers.append(BatchNorm(layer.out_channels, n_conditions))
-            else:
-                new_layers.append(BatchNorm(layer.out_channels))
-    return nn.Sequential(*new_layers)
+# def add_encoder_batch_norm(model, 
+#                            BatchNorm, 
+#                            n_conditions=None
+#                            ):
+#     new_layers = []
+#     for layer in model:
+#         new_layers.append(layer)
+#         if isinstance(layer, nn.Conv2d):
+#             if BatchNorm == ConditionalBatchNorm2d:
+#                 new_layers.append(BatchNorm(layer.out_channels, n_conditions))
+#             else:
+#                 new_layers.append(BatchNorm(layer.out_channels))
+#     return nn.Sequential(*new_layers)
 
-def add_decoder_batch_norm(linear, 
-                           net, 
-                           BatchNorm1d=nn.BatchNorm1d, 
-                           BatchNorm2d=nn.BatchNorm2d, 
-                           n_conditions=None):
-    new_linear = []
-    for layer in linear:
-        new_linear.append(layer)
-        if isinstance(layer, nn.Linear):
-            if BatchNorm1d == ConditionalBatchNorm1d:
-                new_linear.append(BatchNorm1d(layer.out_features, n_conditions))
-            else:
-                new_linear.append(BatchNorm1d(layer.out_features))
+# def add_decoder_batch_norm(linear, 
+#                            net, 
+#                            BatchNorm1d=nn.BatchNorm1d, 
+#                            BatchNorm2d=nn.BatchNorm2d, 
+#                            n_conditions=None):
+#     new_linear = []
+#     for layer in linear:
+#         new_linear.append(layer)
+#         if isinstance(layer, nn.Linear):
+#             if BatchNorm1d == ConditionalBatchNorm1d:
+#                 new_linear.append(BatchNorm1d(layer.out_features, n_conditions))
+#             else:
+#                 new_linear.append(BatchNorm1d(layer.out_features))
     
-    new_net = []
-    for i, layer in enumerate(net):
-        new_net.append(layer)
-        if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d)) and i != len(net):
-            if BatchNorm2d == ConditionalBatchNorm2d:
-                new_net.append(BatchNorm2d(layer.out_channels, n_conditions))
-            else:
-                new_net.append(BatchNorm2d(layer.out_channels))
+#     new_net = []
+#     for i, layer in enumerate(net):
+#         new_net.append(layer)
+#         if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d)) and i != len(net):
+#             if BatchNorm2d == ConditionalBatchNorm2d:
+#                 new_net.append(BatchNorm2d(layer.out_channels, n_conditions))
+#             else:
+#                 new_net.append(BatchNorm2d(layer.out_channels))
 
-    return nn.Sequential(*new_linear), nn.Sequential(*new_net)
+#     return nn.Sequential(*new_linear), nn.Sequential(*new_net)

@@ -8,6 +8,7 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, TQ
 import kornia.augmentation as K
 # import wandb
 import logging
+from pathlib import Path
 from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.callbacks import Callback
 
@@ -17,8 +18,24 @@ from src.callbacks import ImagePredictionLogger
 from src.helper import get_images, set_seed, get_module
 from embed import embed
 import time
+import kornia.geometry.transform as T
+from kornia.augmentation import PadTo
 
 from argparse import ArgumentParser
+import pytorch_lightning as pl
+import jsonpickle
+from monai.transforms import Compose, Resize, SpatialPad, NormalizeIntensity
+
+
+# how to read
+# with open("contrastive-ops/logging/ctvae_/version_12/hparams.yaml", "r") as f:
+#     serialized_hparams = f.read()
+# hparams = jsonpickle.decode(jsonpickle.decode(serialized_hparams)["serialized_hparams"])
+class FlexibleLogger(CSVLogger):
+    def log_hyperparams(self, params):
+        serialized_params = jsonpickle.encode(params, make_refs=False)
+        super().log_hyperparams({"serialized_hparams": serialized_params})
+
 
 parser = ArgumentParser()
 parser.add_argument("--model_name", type=str, default="ctvae")
@@ -31,7 +48,7 @@ parser.add_argument("--max_kl_weight", type=float, default=1)
 parser.add_argument("-w2", "--wasserstein_penalty", type=float, default=8) # for wass. loss
 
 # data settings
-parser.add_argument("--ngene", type=int, default=9314) # TODO 
+parser.add_argument("--ngene", type=int, default=9315) # num. genes + 1
 parser.add_argument("--image_size", type=int, default=64) # TODO: add padding to dataloder? 
 parser.add_argument("--center_crop", action='store_true') # False i.e. keep as is; don't want this augmentation
 
@@ -45,7 +62,7 @@ parser.add_argument("--batch_latent_dim", type=int, default=0) # 0
 parser.add_argument("--n_unique_batch", type=int, default=0) # 0; only used if batch_latent_dim > 0
 
 # enc/dec settings
-parser.add_argument("--model", type=str, default=None) # str for enc/dec arch. 
+parser.add_argument("--model", type=str, default="so2_multich") # str for enc/dec arch. 
 parser.add_argument("--base_channel_size", type=int, default=32) # first layer for enc. 
 parser.add_argument("--adjust_prior_s", action='store_true', default=True)
 parser.add_argument("--adjust_prior_z", action='store_true', default=True)
@@ -71,7 +88,7 @@ parser.add_argument("--save_dir", type=str, default="/data/aferrant/contrastive-
 parser.add_argument("--dataset_path_ntc", type=str, default='/data/aferrant/contrastive-ops/ntc')
 parser.add_argument("--dataset_path_perturbed", type=str, default='/data/aferrant/contrastive-ops/perturbed')
 
-parser.add_argument("--plate_list", type=str, nargs='+', default=['']) # TODO
+parser.add_argument("--plate_list", type=str, nargs='+', default=['A']) # TODO
 parser.add_argument("--test_ratio", type=float, nargs='+', default=[0.83,0.02,0.15])
 parser.add_argument("--save_data_dir", type=str, default="/data/aferrant/contrastive-ops/splits_shuffled") # where perturbed_filtered.pkl / ntc_filtered.pkl live
 parser.add_argument("--batch_size", type=int, default=32)
@@ -97,6 +114,7 @@ args = parser.parse_args()
 # Adding code to use the parsed arguments in the dictionaries
 model_param = {
                 "model_name": args.model_name,
+                "num_input_channels":6,
                 "optimizer_param": {"optimizer": args.optimizer, "lr": args.lr},
                 "step_size": args.step_size,
                 "ngene": args.ngene,
@@ -164,6 +182,7 @@ pprint(data_param)
 pprint(train_param)
 pprint(earlystop)
 
+
 def train():
     # set_seed(42)
 
@@ -191,10 +210,10 @@ def train():
                          )
         else:
             transform = nn.Sequential(
-                            K.Resize(size=(args.image_size, args.image_size), antialias=True), #resize first
-                            ArcsinhTransform(factor=1),
-                            K.Normalize(mean=7, std=7), # use when not performing bc
-                            )
+                PadTo((69,69), pad_mode="constant", pad_value=0),  # Zero-padding
+                ArcsinhTransform(factor=1.0),  # Apply Arcsinh transform
+                K.Normalize(mean=7, std=7))  # Normalize (mean=7, std=7)
+            
     data_param['transform'] = AugmentClass(transform)
 
     # define datamodule
@@ -208,6 +227,10 @@ def train():
 
     # need to figure out logging...
 
+    # Ensure the directory exists
+    log_dir = Path(logger_p['save_dir'])
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     logging.basicConfig(
         filename=f"{logger_p['save_dir']}/training.log", 
         filemode="w",
@@ -215,7 +238,11 @@ def train():
         format='%(asctime)s - %(levelname)s - %(message)s'
     )   
     logger = logging.getLogger()
-    csv_logger = CSVLogger(save_dir=logger_p['save_dir'], 
+    # class DebugCSVLogger(CSVLogger):
+    #     def log_hyperparams(self, params):
+    #         print("Logging hparams:", params)
+    #         super().log_hyperparams(params)
+    csv_logger = FlexibleLogger(save_dir=logger_p['save_dir'], 
                            name=logger_p['name'])
 
 
@@ -234,7 +261,7 @@ def train():
     # Create a PyTorch Lightning trainer with the generation callback
     trainer = L.Trainer(
         accelerator="gpu",
-        devices=1,
+        devices=[2],
         # profiler=profiler,
         callbacks=[
             ModelCheckpoint(monitor='val_loss', mode="min", save_top_k=1, save_weights_only=True, verbose=True),

@@ -69,7 +69,10 @@ def get_images(num, dataloader, transform):
     if type(batch) is dict:
         x = {}
         for key, val in batch.items():
-            x[key] = val[:num,...]
+            if "id" not in key:
+                x[key] = val[:num,...]
+            else:
+                x[key] = val[:num]
     elif isinstance(batch, list):
         x = []
         for val in batch:
