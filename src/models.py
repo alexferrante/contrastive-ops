@@ -239,7 +239,7 @@ class Encoder(torch.nn.Module):
                     y_pose = y_pose[:, [1, 0]]
                     y_pose = y_pose / (
                             torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8
-                        )
+                        ) # (B, 2)
                     return mu, log_var, y_pose
                 else:
                     return mu, log_var
@@ -747,17 +747,24 @@ class ContrastiveVAEmodel(BaseModel):
             #                               prior_mu_target['zprior_m']], dim=0)
         inference_outputs = self.inference(background=background, 
                                            target=target)
-        # TODO: check if above returns poses
-        import pdb;pdb.set_trace()
         background_batch = kwargs.get('background_batch')
         target_batch = kwargs.get('target_batch')
         generative_outputs = self.generative(inference_outputs['background'], 
                                              inference_outputs['target'],
                                              background_batch=background_batch,
                                              target_batch=target_batch)
-        #TODO: pass poses to generative fn, to compute loss; or just transform right here 
-        recon = {'bg':generative_outputs['background']["px_m"], 
-                 "tg":generative_outputs['target']["px_m"]}
+        bg = generative_outputs['background']["px_m"]
+        tg = generative_outputs['target']["px_m"]
+        if self.rotation_module is not None:
+            # use inference_outputs["background"]["zpose"] or ["spose"] for pose adjust 
+            # somewhat arbitrarily choosing spose here...
+            bg = self.rotation_module(bg, inference_outputs["background"]["spose"])
+            tg = self.rotation_module(tg, inference_outputs["target"]["spose"])
+        
+        recon = {'bg':bg, 
+                 "tg":tg}
+            
+        
         inference_outputs['background'].update(prior_mu_background)
         inference_outputs['target'].update(prior_mu_target)
 
@@ -826,11 +833,7 @@ class ContrastiveVAEmodel(BaseModel):
         latent = torch.cat([z, s], dim=-1)
         if batch_embedding is not None:
             latent = torch.cat([latent, batch_embedding], dim=-1)
-        px_m = self.decoder(latent)
-        if self.rotation_module is not None:
-            import pdb;pdb.set_trace()
-            # px_m = self.rotation_module(px_m, )
-            
+        px_m = self.decoder(latent)            
         return dict(px_m=px_m, px_s=self.log_scale)
 
     def generative(
@@ -841,13 +844,17 @@ class ContrastiveVAEmodel(BaseModel):
         ) -> Dict[str, Dict[str, torch.Tensor]]:
         latent_z_shape = background["z"].shape
         batch_size_dim = 0 if len(latent_z_shape) == 2 else 1
+        
         background_batch_size = background["z"].shape[batch_size_dim]
         target_batch_size = target["z"].shape[batch_size_dim]
+        
         generative_input = {}
         for key in ["z", "s"]:
             generative_input[key] = torch.cat(
                 [background[key], target[key]], dim=batch_size_dim
             )
+
+        # unused
         background_batch = kwargs.get("background_batch")
         target_batch = kwargs.get("target_batch")
         if background_batch is not None and target_batch is not None:
@@ -855,14 +862,12 @@ class ContrastiveVAEmodel(BaseModel):
                 [self.batch_embedding(background_batch), 
                  self.batch_embedding(target_batch)], dim=batch_size_dim
                 )
+        #
+
         outputs = self._generic_generative(**generative_input)
         background_outputs, target_outputs = {}, {}
         if outputs["px_m"] is not None:
-            background_tensor, target_tensor = torch.split(
-                outputs["px_m"],
-                [background_batch_size, target_batch_size],
-                dim=batch_size_dim,
-            )
+            background_tensor, target_tensor = torch.split(outputs["px_m"],[background_batch_size, target_batch_size],dim=batch_size_dim,)
         else:
             background_tensor, target_tensor = None, None
         background_outputs["px_m"] = background_tensor
