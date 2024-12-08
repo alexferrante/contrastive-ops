@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import warnings
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
-from inv_model_utils import make_block
+from inv_model_utils import make_block, RotationModule
 
 import escnn
 from escnn import gspaces
@@ -100,20 +100,26 @@ class Encoder(torch.nn.Module):
                 nn.GELU(),
                 nn.Flatten()  # Image grid to single feature vector
             )
-        elif model == 'so2_multich':
+        elif "multich" in model:
             spatial_dims = 2
             num_res_units = 1
             maximum_frequency = 8
-            n_out_vectors = 1
 
             channels = [16,32,64,128]
             strides = [1,1,2,2]
             kernel_sizes = [3]*4
             padding = [None]*4
-            
-            self.gspace = (
-                gspaces.rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)
-            )
+            if model == "so2_multich":
+                self.gspace = (
+                    gspaces.rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)
+                )
+                n_out_vectors = 1
+            else:
+                self.gspace = (
+                    gspaces.trivialOnR2()
+                )
+                n_out_vectors = 0
+
             self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
 
             blocks = [ # (B, 48, input_spatial_dim, input_spatial_dim)
@@ -150,7 +156,7 @@ class Encoder(torch.nn.Module):
                     batch_norm=False,
                     activation=False,
                     last_conv=True,
-                    out_vector_channels=1
+                    out_vector_channels=n_out_vectors
                 )
             )
 
@@ -219,7 +225,7 @@ class Encoder(torch.nn.Module):
 
     def forward(self, x, **kwargs):
         if self.variational:
-            if self.model == "so2_multich":
+            if "multich" in self.model:
                 x = escnn.nn.GeometricTensor(x, self.in_type)
                 y = self.net(x)
                 pool_dims = (2, 3)
@@ -228,7 +234,15 @@ class Encoder(torch.nn.Module):
                 y_embedding = y[:, :self.latent_dim*2]
                 mu = y_embedding[:,:self.latent_dim]
                 log_var = y_embedding[:, self.latent_dim:]
-                return mu, log_var
+                if "so2_multich" == self.model:
+                    y_pose = y[:,self.latent_dim*2:]
+                    y_pose = y_pose[:, [1, 0]]
+                    y_pose = y_pose / (
+                            torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8
+                        )
+                    return mu, log_var, y_pose
+                else:
+                    return mu, log_var
             else:
                 x = self.net(x)
                 mu = self.fc_mu(x)
@@ -705,6 +719,13 @@ class ContrastiveVAEmodel(BaseModel):
         kwargs["encoder_class"] = f"{encoder_class.__module__}.{encoder_class.__name__}"
         kwargs["decoder_class"] = f"{decoder_class.__module__}.{decoder_class.__name__}"
         kwargs = flatten_dict(kwargs)
+        if "so2" in model:
+            self.rotation_module = RotationModule(
+                "so2", 2, 0, 1e-8
+            )
+        else:
+            self.rotation_module = None
+
         self.save_hyperparameters(kwargs)
 
     def forward(self, background, target, **kwargs):
@@ -726,12 +747,15 @@ class ContrastiveVAEmodel(BaseModel):
             #                               prior_mu_target['zprior_m']], dim=0)
         inference_outputs = self.inference(background=background, 
                                            target=target)
+        # TODO: check if above returns poses
+        import pdb;pdb.set_trace()
         background_batch = kwargs.get('background_batch')
         target_batch = kwargs.get('target_batch')
         generative_outputs = self.generative(inference_outputs['background'], 
                                              inference_outputs['target'],
                                              background_batch=background_batch,
                                              target_batch=target_batch)
+        #TODO: pass poses to generative fn, to compute loss; or just transform right here 
         recon = {'bg':generative_outputs['background']["px_m"], 
                  "tg":generative_outputs['target']["px_m"]}
         inference_outputs['background'].update(prior_mu_background)
@@ -747,8 +771,8 @@ class ContrastiveVAEmodel(BaseModel):
     def _generic_inference(self,
                              x: torch.Tensor,
                              ):
-        qz_m, qz_lv = self.z_encoder(x)
-        qs_m, qs_lv = self.s_encoder(x)
+        qz_m, qz_lv, zpose = self.z_encoder(x)
+        qs_m, qs_lv, spose = self.s_encoder(x)
         
         # sample from latent distribution
         qz_lv = torch.maximum(qz_lv, torch.tensor(-20)) #clipping to prevent going to -inf
@@ -766,7 +790,9 @@ class ContrastiveVAEmodel(BaseModel):
             z=z,
             qs_m=qs_m,
             qs_s=qs_s,
-            s=s,)
+            s=s,
+            zpose=zpose,
+            spose=spose)
         return outputs
     
     def inference(
@@ -801,6 +827,10 @@ class ContrastiveVAEmodel(BaseModel):
         if batch_embedding is not None:
             latent = torch.cat([latent, batch_embedding], dim=-1)
         px_m = self.decoder(latent)
+        if self.rotation_module is not None:
+            import pdb;pdb.set_trace()
+            # px_m = self.rotation_module(px_m, )
+            
         return dict(px_m=px_m, px_s=self.log_scale)
 
     def generative(
