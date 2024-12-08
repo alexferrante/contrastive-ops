@@ -2,6 +2,7 @@
 import torch
 import torchvision
 import os
+import numpy as np
 from lightning.pytorch.callbacks import Callback
 
 class ImagePredictionLogger(Callback):
@@ -37,16 +38,24 @@ class ImagePredictionLogger(Callback):
                 pl_module.train()
             # Plot and add to tensorboard
             reconst_imgs = torch.cat(list(reconst_imgs.values()), dim=0) if type(reconst_imgs) is dict else reconst_imgs
+            reconst_imgs = reconst_imgs.detach().cpu().numpy()
             val_imgs = torch.cat(list(val_imgs.values()), dim=0) if type(val_imgs) is dict else val_imgs
-            imgs = torch.stack([val_imgs, reconst_imgs], dim=1).flatten(0, 1)
-            grid = torchvision.utils.make_grid(imgs, nrow=8, normalize=True, range=(-1, 1))
+            val_imgs = val_imgs.detach().cpu().numpy()
+            save_path = os.path.join(trainer.logger.save_dir, f"recon_step_{trainer.global_step}")
+            concat_imgs = np.concatenate((val_imgs, reconst_imgs), axis=0)
+            np.save(save_path, concat_imgs)
+            
 
-            for channel_idx in range(grid.shape[0]):  # Iterate over channels
-                single_channel = grid[channel_idx]  # Extract the single channel (286, 570)
-                single_channel = single_channel.unsqueeze(0)  # Add batch dimension (1, 286, 570)
-                save_path = os.path.join(trainer.logger.save_dir, f"recon_ch_{channel_idx}_step_{trainer.global_step}.png")
-                torchvision.utils.save_image(single_channel, save_path)
-                print(f"Saved grid for channel {channel_idx} at {save_path}")
+
+            # imgs = torch.stack([val_imgs, reconst_imgs], dim=1).flatten(0, 1)
+            # grid = torchvision.utils.make_grid(imgs, nrow=8, normalize=True, range=(-1, 1))
+
+            # for channel_idx in range(grid.shape[0]):  # Iterate over channels
+            #     single_channel = grid[channel_idx]  # Extract the single channel (286, 570)
+            #     single_channel = single_channel.unsqueeze(0)  # Add batch dimension (1, 286, 570)
+            #     save_path = os.path.join(trainer.logger.save_dir, f"recon_ch_{channel_idx}_step_{trainer.global_step}.png")
+            #     torchvision.utils.save_image(single_channel, save_path)
+            #     print(f"Saved grid for channel {channel_idx} at {save_path}")
             # trainer.logger.experiment.log({"Reconstructions":
             #                                wandb.Image(grid, caption="Left: Input, Right: Output"),
             #                                "global_steps": trainer.global_step})
