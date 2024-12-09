@@ -102,15 +102,15 @@ class Encoder(torch.nn.Module):
                     nn.GELU(),
                     nn.Flatten()  # Image grid to single feature vector
                 )
-            elif "multich" in model:
+            elif model in ["so2_multich", "multich", "so2_multich_pose"]:
                 spatial_dims = 2
                 num_res_units = 1
-    
+
                 channels = [16,32,64,128]
                 strides = [1,1,2,2]
                 kernel_sizes = [3]*4
                 padding = [None]*4
-                if model == "so2_multich":
+                if "so2" in model:
                     self.gspace = (
                         gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
                     )
@@ -120,8 +120,12 @@ class Encoder(torch.nn.Module):
                         gspaces.trivialOnR2()
                     )
                     n_out_vectors = 0
-    
-                self.in_type = escnn.nn.FieldType(self.gspace, num_input_channels*[self.gspace.trivial_repr])
+
+                if model == "so2_multich_pose":
+                    n_ch = 1
+                else:
+                    n_ch = num_input_channels
+                self.in_type = escnn.nn.FieldType(self.gspace, n_ch*[self.gspace.trivial_repr])
     
                 blocks = [ # (B, 48, input_spatial_dim, input_spatial_dim)
                     make_block(
@@ -216,7 +220,7 @@ class Encoder(torch.nn.Module):
                 blocks.append(
                     make_block(
                         blocks[-1].out_type,
-                        out_channels=latent_dim*2,  # encoder out size ? need to tweak for varational version 
+                        out_channels=latent_dim*2,
                         stride=1,
                         kernel_size=1,
                         padding=0,
@@ -330,7 +334,7 @@ class Encoder(torch.nn.Module):
         
         if self.variational:
             if model is not None:
-                if model in ["multich", "so2_multich", "singlech", "so2_singlech", "so2_paper"]:
+                if model in ["multich", "so2_multich", "singlech", "so2_singlech", "so2_paper", "so2_multich_pose"]:
                     self.fc_mu = None
                     self.fc_log_var = None
                 else:
@@ -344,6 +348,8 @@ class Encoder(torch.nn.Module):
                 elif width == 64:
                     self.fc_mu = nn.Linear(2 * 8 * 8 * c_hid, latent_dim)
                     self.fc_log_var = nn.Linear(2 * 8 * 8 * c_hid, latent_dim)
+                elif width == 69:
+                    import pdb;pdb.set_trace()
         else:
             self.net = nn.Sequential(self.net, nn.Linear(input_size, latent_dim))
 
@@ -355,23 +361,46 @@ class Encoder(torch.nn.Module):
         if self.variational:
             if self.model is not None:
                 if "multich" in self.model or "singlech" in self.model or "so2" in self.model:
-                    x = escnn.nn.GeometricTensor(x, self.in_type)
-                    y = self.net(x)
-                    pool_dims = (2, 3)
-                    y = y.tensor
-                    y = y.mean(dim=pool_dims)
-                    y_embedding = y[:, :self.latent_dim*2]
-                    mu = y_embedding[:,:self.latent_dim]
-                    log_var = y_embedding[:, self.latent_dim:]
-                    if "so2" in self.model:
-                        y_pose = y[:,self.latent_dim*2:]
-                        y_pose = y_pose[:, [1, 0]]
-                        y_pose = y_pose / (
-                                torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8
-                            ) # (B, 2)
+                    if self.model == "so2_multich_pose":
+                        batch_size, num_channels, height, width = x.shape
+                        channel_outputs = []
+                        for i in range(num_channels):
+                            ch = x[:, i:i+1, :, :]  # Shape: (B, 1, x, x)
+                            ch = escnn.nn.GeometricTensor(ch, self.in_type)
+                            out = self.net(ch)
+                            channel_outputs.append(out.tensor)
+
+                        y = torch.stack(channel_outputs, dim=1)
+                        pool_dims = (3, 4)  # Pool over spatial dimensions
+                        y = y.mean(dim=pool_dims) # (B, 6, latent_dim+2)
+                        y_pose = y[:, :, self.latent_dim*2:]
+
+                        y = y.mean(dim=1)
+                        y_embedding = y[:, :self.latent_dim*2] 
+                        mu = y_embedding[:, :self.latent_dim]
+                        log_var = y_embedding[:, self.latent_dim:]
+                        
+                        y_pose = y_pose[:, :, [1, 0]]  # Swap for (cos, sin)
+                        y_pose = y_pose / (torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8)  # Normalize
                         return mu, log_var, y_pose
                     else:
-                        return mu, log_var
+                        x = escnn.nn.GeometricTensor(x, self.in_type)
+                        y = self.net(x)
+                        pool_dims = (2, 3)
+                        y = y.tensor
+                        y = y.mean(dim=pool_dims)
+                        y_embedding = y[:, :self.latent_dim*2]
+                        mu = y_embedding[:, :self.latent_dim]
+                        log_var = y_embedding[:, self.latent_dim:]
+                        if "so2" in self.model:
+                            y_pose = y[:,self.latent_dim*2:]
+                            y_pose = y_pose[:, [1, 0]]
+                            y_pose = y_pose / (
+                                    torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8
+                                ) # (B, 2)
+                            return mu, log_var, y_pose
+                        else:
+                            return mu, log_var
             else:
                 x = self.net(x)
                 mu = self.fc_mu(x)
@@ -957,8 +986,25 @@ class ContrastiveVAEmodel(BaseModel):
         if self.rotation_module is not None:
             # use inference_outputs["background"]["zpose"] or ["spose"] for pose adjust 
             # somewhat arbitrarily choosing spose here...
-            bg = self.rotation_module(bg, inference_outputs["background"]["spose"])
-            tg = self.rotation_module(tg, inference_outputs["target"]["spose"])
+            if self.model == "so2_multich_pose":
+                bg_channels = []
+                tg_channels = []
+            
+                for ch_idx in range(bg.shape[1]):
+                    bg_ch = self.rotation_module(bg[:, ch_idx:ch_idx+1, ...], 
+                                                 inference_outputs["background"]["spose"][:, ch_idx, ...])
+                    bg_channels.append(bg_ch)
+            
+                    tg_ch = self.rotation_module(tg[:, ch_idx:ch_idx+1, ...], 
+                                                 inference_outputs["target"]["spose"][:, ch_idx, ...])
+                    tg_channels.append(tg_ch)
+            
+                # Stack the processed channels back along the channel dimension
+                bg = torch.cat(bg_channels, dim=1)
+                tg = torch.cat(tg_channels, dim=1)
+            else:
+                bg = self.rotation_module(bg, inference_outputs["background"]["spose"])
+                tg = self.rotation_module(tg, inference_outputs["target"]["spose"])
         
         recon = {'bg':bg, 
                  "tg":tg}
