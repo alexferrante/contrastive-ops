@@ -2,7 +2,7 @@ from pathlib import Path
 from src.helper import get_module, embed_images
 import logging
 import argparse
-import jsonpickle
+import torch
 
 def embed(run_name, save_dir, ckpt_path, loader_param=None, module='contrastive'):
     """

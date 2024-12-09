@@ -24,7 +24,7 @@ def embed_images(model, data_module, stage='embed', loader_param=None, modelname
 
     pbar = tqdm(total=len(dataloader), file=sys.stdout, desc="Encoding images", leave=False, mininterval=300)
     if modelname == 'contrastive':
-        for imgs, labels in dataloader:
+        for imgs, labels, uid in dataloader:
             imgs = transform(imgs.to(model.device))
             labels = labels.to(model.device)
             with torch.inference_mode():
@@ -37,10 +37,10 @@ def embed_images(model, data_module, stage='embed', loader_param=None, modelname
                 embed_list.append(model.get_image_embedding(imgs))
             pbar.update()
     pbar.close()
+    import pdb;pdb.set_trace()
     embedding = torch.cat(embed_list, dim=0)
     embedding_df = pd.DataFrame(embedding.cpu().numpy())
-    embedding_df = pd.concat([data_module.ds_all.df[[Column.sgRNA.value,Column.gene.value]]
-                            .reset_index(drop=True), embedding_df], axis=1)
+    embedding_df = pd.concat([data_module.ds_all.df[[Column.sgRNA.value,Column.gene.value,Column.uid.value]].reset_index(drop=True), embedding_df], axis=1)
     return embedding_df
 
 def display_patch(image):
