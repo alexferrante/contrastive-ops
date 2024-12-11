@@ -361,6 +361,20 @@ def get_non_linearity(scalar_fields, vector_fields):
     return nonlinearity
 
 
+def get_elu_non_linearity(scalar_fields, vector_fields):
+    nonlinearity = nn.PointwiseNonLinearity(scalar_fields, "p_elu")
+
+    if len(vector_fields) > 0:
+        out_type = scalar_fields + vector_fields
+        norm_nonlinearity = nn.NormNonLinearity(vector_fields)
+        nonlinearity = nn.MultipleModule(
+            out_type,
+            ["elu"] * len(scalar_fields) + ["norm"] * len(vector_fields),
+            [(nonlinearity, "elu"), (norm_nonlinearity, "norm")],
+        )
+    return nonlinearity
+
+
 def get_batch_norm(scalar_fields, vector_fields, batch_norm_cls):
     batch_norm = batch_norm_cls(scalar_fields)
     if len(vector_fields) > 0:
