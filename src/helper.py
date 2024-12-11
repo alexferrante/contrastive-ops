@@ -37,7 +37,6 @@ def embed_images(model, data_module, stage='embed', loader_param=None, modelname
                 embed_list.append(model.get_image_embedding(imgs))
             pbar.update()
     pbar.close()
-    import pdb;pdb.set_trace()
     embedding = torch.cat(embed_list, dim=0)
     embedding_df = pd.DataFrame(embedding.cpu().numpy())
     embedding_df = pd.concat([data_module.ds_all.df[[Column.sgRNA.value,Column.gene.value,Column.uid.value]].reset_index(drop=True), embedding_df], axis=1)

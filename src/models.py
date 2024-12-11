@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import warnings
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
-from src.inv_model_utils import make_block, RotationModule
+from src.inv_model_utils import make_block, RotationModule, Convolution, get_elu_non_linearity
 
 import escnn
 from escnn import gspaces
@@ -241,7 +241,6 @@ class Encoder(torch.nn.Module):
     
                 self.net = escnn.nn.SequentialModule(*blocks)
             elif model == "so2_paper":
-                from inv_model_utils import Convolution
                 
                 self.gspace = (
                         gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
@@ -256,7 +255,7 @@ class Encoder(torch.nn.Module):
                                 kernel_size=3, 
                                 padding=1, 
                                 stride=2,
-                                batch_norm=False,
+                                batch_norm=BatchNorm,
                                 activation=True)]
                 blocks.append(
                     Convolution(spatial_dims=2,
@@ -265,7 +264,7 @@ class Encoder(torch.nn.Module):
                                 kernel_size=3, 
                                 padding=1, 
                                 stride=1,
-                                batch_norm=False,
+                                batch_norm=BatchNorm,
                                 activation=True))  # 64x64 => ? 32x32
                 blocks.append(
                     Convolution(spatial_dims=2,
@@ -274,7 +273,7 @@ class Encoder(torch.nn.Module):
                                 kernel_size=3, 
                                 padding=1, 
                                 stride=2,
-                                batch_norm=False,
+                                batch_norm=BatchNorm,
                                 activation=True)) # 64x64 => ? 32x32
                 blocks.append(
                     Convolution(spatial_dims=2,
@@ -283,7 +282,7 @@ class Encoder(torch.nn.Module):
                                 kernel_size=3, 
                                 padding=1, 
                                 stride=1,
-                                batch_norm=False,
+                                batch_norm=BatchNorm,
                                 activation=True))  # 64x64 => ? 32x32
                 blocks.append(
                     Convolution(spatial_dims=2,
@@ -295,9 +294,118 @@ class Encoder(torch.nn.Module):
                                 batch_norm=False,
                                 activation=True, 
                                 out_vector_channels=1))  # 64x64 => ? 32x32
-                    # nn.Flatten(),  # Image grid to single feature vector
-                 #TODO how to handle flat? prob just pool? 
                 self.net = escnn.nn.SequentialModule(*blocks)
+            elif model in ["so2_direct_paper","so2_multich_pose_direct_paper"]:
+                self.gspace = (
+                        gspaces.rot2dOnR2(N=-1, maximum_frequency=8)
+                    )
+                if model == "so2_multich_pose_direct_paper":
+                    nch=1
+                else:
+                    nch=num_input_channels
+                self.in_type = escnn.nn.FieldType(self.gspace, nch*[self.gspace.trivial_repr])
+
+                if self.latent_dim == 32:
+                    kernels = [3]*5
+                    paddings = [1]*5
+                    strides = [2,1,2,1,2]
+                elif self.latent_dim == 64:
+                    pass
+                    # TODO
+                    # kernels = [3]*4
+                    # paddings = [1]*4
+                    # strides = [2,1,2,1]
+                else:
+                    raise NotImplementedError
+
+            
+                gspace = self.in_type.gspace
+                out_ch = c_hid
+                out_vch = (out_ch)
+                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
+                vector_fields = escnn.nn.FieldType(
+                    gspace, out_vch * [gspace.irrep(1)]
+                )
+                out_type = scalar_fields + vector_fields
+                act_fn_1 = get_elu_non_linearity(scalar_fields, vector_fields)
+                blocks = [
+                        escnn.nn.R2Conv(self.in_type,
+                                        out_type, 
+                                        kernel_size=kernels[0], 
+                                        padding=paddings[0], 
+                                        stride=strides[0]), 
+                        act_fn_1]
+
+                gspace = blocks[-2].out_type.gspace 
+                out_ch = c_hid
+                out_vch = (out_ch)
+                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
+                vector_fields = escnn.nn.FieldType(
+                    gspace, out_vch * [gspace.irrep(1)]
+                )
+                out_type = scalar_fields + vector_fields
+                act_fn_2 = get_elu_non_linearity(scalar_fields, vector_fields)
+                
+                blocks.extend([escnn.nn.R2Conv(blocks[-1].out_type,
+                                        out_type, 
+                                        kernel_size=kernels[1], 
+                                        padding=paddings[1], 
+                                        stride=strides[1]), 
+                               act_fn_2])
+
+                gspace = blocks[-2].out_type.gspace 
+                out_ch = 2*c_hid
+                out_vch = (out_ch)
+                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
+                vector_fields = escnn.nn.FieldType(
+                    gspace, out_vch * [gspace.irrep(1)]
+                )
+                out_type = scalar_fields + vector_fields
+                act_fn_3 = get_elu_non_linearity(scalar_fields, vector_fields)
+                
+                blocks.extend([escnn.nn.R2Conv(blocks[-1].out_type,
+                                        out_type, 
+                                        kernel_size=kernels[2], 
+                                        padding=paddings[2], 
+                                        stride=strides[2]), 
+                               act_fn_3])
+
+                gspace = blocks[-2].out_type.gspace 
+                out_ch = 2*c_hid
+                out_vch = (out_ch)
+                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
+                vector_fields = escnn.nn.FieldType(
+                    gspace, out_vch * [gspace.irrep(1)]
+                )
+                out_type = scalar_fields + vector_fields
+                act_fn_4 = get_elu_non_linearity(scalar_fields, vector_fields)
+    
+                blocks.extend([escnn.nn.R2Conv(blocks[-1].out_type,
+                                        out_type, 
+                                        kernel_size=kernels[3], 
+                                        padding=paddings[3], 
+                                        stride=strides[3]), 
+                               act_fn_4])
+    
+                gspace = blocks[-2].out_type.gspace 
+                out_ch = 2*c_hid
+                out_vch = (1)
+                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
+                vector_fields = escnn.nn.FieldType(
+                    gspace, out_vch * [gspace.irrep(1)]
+                )
+                out_type = scalar_fields + vector_fields
+                act_fn_5 = get_elu_non_linearity(scalar_fields, vector_fields)
+    
+                blocks.extend([escnn.nn.R2Conv(blocks[-1].out_type,
+                                        out_type, 
+                                        kernel_size=kernels[4], 
+                                        padding=paddings[4], 
+                                        stride=strides[4]), 
+                               act_fn_5])
+
+                self.net = escnn.nn.SequentialModule(*blocks)
+
         else:
             if width == 96:
                 self.net = nn.Sequential(
@@ -334,7 +442,8 @@ class Encoder(torch.nn.Module):
         
         if self.variational:
             if model is not None:
-                if model in ["multich", "so2_multich", "singlech", "so2_singlech", "so2_paper", "so2_multich_pose"]:
+                if model in ["multich", "so2_multich", "singlech", "so2_singlech", "so2_paper", \
+                             "so2_multich_pose", "so2_multich_pose_direct_paper"]:
                     self.fc_mu = None
                     self.fc_log_var = None
                 else:
@@ -349,7 +458,7 @@ class Encoder(torch.nn.Module):
                     self.fc_mu = nn.Linear(2 * 8 * 8 * c_hid, latent_dim)
                     self.fc_log_var = nn.Linear(2 * 8 * 8 * c_hid, latent_dim)
                 elif width == 69:
-                    import pdb;pdb.set_trace()
+                    raise NotImplementedError
         else:
             self.net = nn.Sequential(self.net, nn.Linear(input_size, latent_dim))
 
@@ -361,17 +470,17 @@ class Encoder(torch.nn.Module):
         if self.variational:
             if self.model is not None:
                 if "multich" in self.model or "singlech" in self.model or "so2" in self.model:
-                    if self.model == "so2_multich_pose":
+                    if self.model in ["so2_multich_pose", "so2_multich_pose_direct_paper"]:
                         batch_size, num_channels, height, width = x.shape
                         channel_outputs = []
                         for i in range(num_channels):
-                            ch = x[:, i:i+1, :, :]  # Shape: (B, 1, x, x)
+                            ch = x[:, i:i+1, :, :]  #(B, 1, x, x)
                             ch = escnn.nn.GeometricTensor(ch, self.in_type)
                             out = self.net(ch)
                             channel_outputs.append(out.tensor)
 
                         y = torch.stack(channel_outputs, dim=1)
-                        pool_dims = (3, 4)  # Pool over spatial dimensions
+                        pool_dims = (3, 4)
                         y = y.mean(dim=pool_dims) # (B, 6, latent_dim+2)
                         y_pose = y[:, :, self.latent_dim*2:]
 
@@ -380,8 +489,8 @@ class Encoder(torch.nn.Module):
                         mu = y_embedding[:, :self.latent_dim]
                         log_var = y_embedding[:, self.latent_dim:]
                         
-                        y_pose = y_pose[:, :, [1, 0]]  # Swap for (cos, sin)
-                        y_pose = y_pose / (torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8)  # Normalize
+                        y_pose = y_pose[:, :, [1, 0]]
+                        y_pose = y_pose / (torch.norm(y_pose, dim=-1, keepdim=True) + 1e-8)
                         return mu, log_var, y_pose
                     else:
                         x = escnn.nn.GeometricTensor(x, self.in_type)
@@ -389,6 +498,7 @@ class Encoder(torch.nn.Module):
                         pool_dims = (2, 3)
                         y = y.tensor
                         y = y.mean(dim=pool_dims)
+                        import pdb;pdb.set_trace()
                         y_embedding = y[:, :self.latent_dim*2]
                         mu = y_embedding[:, :self.latent_dim]
                         log_var = y_embedding[:, self.latent_dim:]
@@ -482,7 +592,7 @@ class Decoder(torch.nn.Module):
                     nn.ConvTranspose2d(c_hid // 2, num_input_channels, kernel_size=3, output_padding=1, padding=1, stride=2), # 48x48 => 96x96
                     nn.Tanh(),
                 )
-            elif "multich" in model:
+            elif model in ["so2_multich", "multich", "so2_multich_pose"]:
                 final_size = (18,18) # for LD 64 
     
                 channels = [64, 32, 16, 6]
@@ -587,7 +697,7 @@ class Decoder(torch.nn.Module):
                     *decode_blocks,
                     nn.Identity(),
                 )
-            elif "so2_paper" == model:
+            elif model in ["so2_paper", "so2_direct_paper", "so2_multich_pose_direct_paper"]:
                 self.linear = nn.Sequential(
                     nn.Linear(latent_dim + batch_latent_dim, 2 * 8 * 8 * c_hid), 
                     act_fn(),
@@ -938,15 +1048,16 @@ class ContrastiveVAEmodel(BaseModel):
         self.log_scale = torch.nn.Parameter(torch.Tensor([0.0]))
 
         # Example input array needed for visualizing the graph of the network
-        self.example_input_array = {'background': torch.zeros(2, self.num_input_channels, self.width, self.height),
-                                        'target': torch.zeros(2, self.num_input_channels, self.width, self.height)}
-        if self.adjust_prior_s or self.adjust_prior_z:
-            self.example_input_array['background_label'] = torch.zeros(2, dtype=torch.int32)
-            self.example_input_array['target_label'] = torch.zeros(2, dtype=torch.int32)
-        if self.batch_latent_dim > 0:
-            self.batch_embedding = torch.nn.Embedding(self.n_unique_batch, self.batch_latent_dim)
-            self.example_input_array.update({'background_batch': torch.zeros(2, dtype=torch.int32),
-                                            'target_batch': torch.zeros(2, dtype=torch.int32)})
+        # self.example_input_array = {'background': torch.zeros(2, self.num_input_channels, self.width, self.height),
+        #                                 'target': torch.zeros(2, self.num_input_channels, self.width, self.height)}
+        
+        # if self.adjust_prior_s or self.adjust_prior_z:
+        #     self.example_input_array['background_label'] = torch.zeros(2, dtype=torch.int32)
+        #     self.example_input_array['target_label'] = torch.zeros(2, dtype=torch.int32)
+        # if self.batch_latent_dim > 0:
+        #     self.batch_embedding = torch.nn.Embedding(self.n_unique_batch, self.batch_latent_dim)
+        #     self.example_input_array.update({'background_batch': torch.zeros(2, dtype=torch.int32),
+        #                                     'target_batch': torch.zeros(2, dtype=torch.int32)})
         if model is not None and "so2" in model:
             self.rotation_module = RotationModule(
                 "so2", 2, 0, 1e-8
@@ -961,20 +1072,16 @@ class ContrastiveVAEmodel(BaseModel):
         target_label = kwargs.get('target_label')
         prior_mu_background = {'zprior_m': None,  'sprior_m': None}
         prior_mu_target = {'zprior_m': None, 'sprior_m': None}
-        # zlabel_embedding = None
-        # slabel_embedding = None
+        
         if self.adjust_prior_s:
             prior_mu_background['sprior_m'] = self.sprior_embedding(background_label.int())
             prior_mu_target['sprior_m'] = self.sprior_embedding(target_label.int())
-            # slabel_embedding = torch.cat([prior_mu_background['sprior_m'], 
-            #                               prior_mu_target['sprior_m']], dim=0)
+
         if self.adjust_prior_z:
             prior_mu_background['zprior_m'] = self.zprior_embedding(background_label.int())
             prior_mu_target['zprior_m'] = self.zprior_embedding(target_label.int())
-            # zlabel_embedding = torch.cat([prior_mu_background['zprior_m'], 
-            #                               prior_mu_target['zprior_m']], dim=0)
-        inference_outputs = self.inference(background=background, 
-                                           target=target)
+
+        inference_outputs = self.inference(background=background, target=target)
         background_batch = kwargs.get('background_batch')
         target_batch = kwargs.get('target_batch')
         generative_outputs = self.generative(inference_outputs['background'], 
@@ -986,7 +1093,7 @@ class ContrastiveVAEmodel(BaseModel):
         if self.rotation_module is not None:
             # use inference_outputs["background"]["zpose"] or ["spose"] for pose adjust 
             # somewhat arbitrarily choosing spose here...
-            if self.model == "so2_multich_pose":
+            if self.model in ["so2_multich_pose","so2_multich_pose_direct_paper"]:
                 bg_channels = []
                 tg_channels = []
             
@@ -1016,8 +1123,13 @@ class ContrastiveVAEmodel(BaseModel):
         return recon, inference_outputs, generative_outputs
     
     def get_image_embedding(self, img, label=None):
-        qz_m, _ = self.z_encoder(img)
-        qs_m, _ = self.s_encoder(img)
+        if self.model is None:
+            qz_m, _ = self.z_encoder(img)
+            qs_m, _ = self.s_encoder(img)
+        else:
+            qz_m, _, _ = self.z_encoder(img)
+            qs_m, _, _ = self.s_encoder(img)
+            
         return torch.cat((qs_m, qz_m), dim=1)
 
     def _generic_inference(self, x: torch.Tensor):
@@ -1116,7 +1228,7 @@ class ContrastiveVAEmodel(BaseModel):
                  self.batch_embedding(target_batch)], dim=batch_size_dim
                 )
         #
-
+        
         outputs = self._generic_generative(**generative_input)
         background_outputs, target_outputs = {}, {}
         if outputs["px_m"] is not None:
