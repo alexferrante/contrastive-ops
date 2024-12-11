@@ -137,6 +137,15 @@ def get_rotation_matrix_so3(z, eps=1e-6):
     return rot
 
 
+def create_mcvae_enc_so2_block(gspace, in_type, out_ch, out_vch, kernel, padding, stride):
+    scalar_fields = nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
+    vector_fields = nn.FieldType(gspace, out_vch * [gspace.irrep(1)])
+    out_type = scalar_fields + vector_fields
+    act_fn = get_elu_non_linearity(scalar_fields, vector_fields)
+    conv = nn.R2Conv(in_type, out_type, kernel_size=kernel, padding=padding, stride=stride)
+    return conv, act_fn
+
+
 def make_block(
     in_type,
     out_channels,

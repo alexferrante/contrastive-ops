@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import warnings
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
-from src.inv_model_utils import make_block, RotationModule, Convolution, get_elu_non_linearity
+from src.inv_model_utils import make_block, RotationModule, Convolution, create_mcvae_enc_so2_block
 
 import escnn
 from escnn import gspaces
@@ -309,103 +309,35 @@ class Encoder(torch.nn.Module):
                     kernels = [3]*5
                     paddings = [1]*5
                     strides = [2,1,2,1,2]
+                    factors = [1,1,2,2,2] 
                 elif self.latent_dim == 64:
-                    pass
-                    # TODO
-                    # kernels = [3]*4
-                    # paddings = [1]*4
-                    # strides = [2,1,2,1]
+                    kernels = [3]*6 
+                    paddings = [1]*6
+                    # [B, 130, 5, 5] pre-pool
+                    strides = [2,1,2,1,2,2]
+                    factors = [1,2,3,3,3,4]
                 else:
-                    raise NotImplementedError
+                    raise NotImplementedError(f"Unsupported latent_dim: {self.latent_dim}")
 
-            
+
                 gspace = self.in_type.gspace
-                out_ch = c_hid
-                out_vch = (out_ch)
-                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
-                vector_fields = escnn.nn.FieldType(
-                    gspace, out_vch * [gspace.irrep(1)]
-                )
-                out_type = scalar_fields + vector_fields
-                act_fn_1 = get_elu_non_linearity(scalar_fields, vector_fields)
-                blocks = [
-                        escnn.nn.R2Conv(self.in_type,
-                                        out_type, 
-                                        kernel_size=kernels[0], 
-                                        padding=paddings[0], 
-                                        stride=strides[0]), 
-                        act_fn_1]
-
-                gspace = blocks[-2].out_type.gspace 
-                out_ch = c_hid
-                out_vch = (out_ch)
-                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
-                vector_fields = escnn.nn.FieldType(
-                    gspace, out_vch * [gspace.irrep(1)]
-                )
-                out_type = scalar_fields + vector_fields
-                act_fn_2 = get_elu_non_linearity(scalar_fields, vector_fields)
+                in_type = self.in_type
+                blocks = []
                 
-                blocks.extend([escnn.nn.R2Conv(blocks[-1].out_type,
-                                        out_type, 
-                                        kernel_size=kernels[1], 
-                                        padding=paddings[1], 
-                                        stride=strides[1]), 
-                               act_fn_2])
-
-                gspace = blocks[-2].out_type.gspace 
-                out_ch = 2*c_hid
-                out_vch = (out_ch)
-                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
-                vector_fields = escnn.nn.FieldType(
-                    gspace, out_vch * [gspace.irrep(1)]
-                )
-                out_type = scalar_fields + vector_fields
-                act_fn_3 = get_elu_non_linearity(scalar_fields, vector_fields)
+                for i, (kernel, padding, stride, factor) in enumerate(zip(kernels, paddings, strides, factors)):
+                    if i == len(kernels) - 1:
+                        out_ch = factor * c_hid
+                        out_vch = (1)
+                    else:
+                        out_ch = factor * c_hid
+                        out_vch = (out_ch)
+                    
+                    conv, act_fn = create_mcvae_enc_so2_block(gspace, in_type, out_ch, out_vch, kernel, padding, stride)
+                    blocks.extend([conv, act_fn])
+                    in_type = conv.out_type  
+                    gspace = in_type.gspace 
                 
-                blocks.extend([escnn.nn.R2Conv(blocks[-1].out_type,
-                                        out_type, 
-                                        kernel_size=kernels[2], 
-                                        padding=paddings[2], 
-                                        stride=strides[2]), 
-                               act_fn_3])
-
-                gspace = blocks[-2].out_type.gspace 
-                out_ch = 2*c_hid
-                out_vch = (out_ch)
-                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
-                vector_fields = escnn.nn.FieldType(
-                    gspace, out_vch * [gspace.irrep(1)]
-                )
-                out_type = scalar_fields + vector_fields
-                act_fn_4 = get_elu_non_linearity(scalar_fields, vector_fields)
-    
-                blocks.extend([escnn.nn.R2Conv(blocks[-1].out_type,
-                                        out_type, 
-                                        kernel_size=kernels[3], 
-                                        padding=paddings[3], 
-                                        stride=strides[3]), 
-                               act_fn_4])
-    
-                gspace = blocks[-2].out_type.gspace 
-                out_ch = 2*c_hid
-                out_vch = (1)
-                scalar_fields = escnn.nn.FieldType(gspace, out_ch * [gspace.trivial_repr])
-                vector_fields = escnn.nn.FieldType(
-                    gspace, out_vch * [gspace.irrep(1)]
-                )
-                out_type = scalar_fields + vector_fields
-                act_fn_5 = get_elu_non_linearity(scalar_fields, vector_fields)
-    
-                blocks.extend([escnn.nn.R2Conv(blocks[-1].out_type,
-                                        out_type, 
-                                        kernel_size=kernels[4], 
-                                        padding=paddings[4], 
-                                        stride=strides[4]), 
-                               act_fn_5])
-
                 self.net = escnn.nn.SequentialModule(*blocks)
-
         else:
             if width == 96:
                 self.net = nn.Sequential(
@@ -498,7 +430,6 @@ class Encoder(torch.nn.Module):
                         pool_dims = (2, 3)
                         y = y.tensor
                         y = y.mean(dim=pool_dims)
-                        import pdb;pdb.set_trace()
                         y_embedding = y[:, :self.latent_dim*2]
                         mu = y_embedding[:, :self.latent_dim]
                         log_var = y_embedding[:, self.latent_dim:]
@@ -698,24 +629,42 @@ class Decoder(torch.nn.Module):
                     nn.Identity(),
                 )
             elif model in ["so2_paper", "so2_direct_paper", "so2_multich_pose_direct_paper"]:
-                self.linear = nn.Sequential(
-                    nn.Linear(latent_dim + batch_latent_dim, 2 * 8 * 8 * c_hid), 
-                    act_fn(),
-                    nn.Unflatten(1, (-1, 8, 8)),
+                if latent_dim == 64:
+                    self.linear = nn.Sequential(
+                        nn.Linear(latent_dim + batch_latent_dim, 2 * 8 * 8 * c_hid), 
+                        act_fn(),
+                        nn.Unflatten(1, (-1, 8, 8)),
+                        )
+                    self.net = nn.Sequential(
+                        nn.ConvTranspose2d(2 * c_hid, 2 * c_hid, kernel_size=3, output_padding=1, padding=1, stride=2),  # 8x8 => 16x16
+                        act_fn(),
+                        nn.Conv2d(2 * c_hid, 2 * c_hid, kernel_size=3, padding=1),
+                        act_fn(),
+                        nn.ConvTranspose2d(2 * c_hid, c_hid, kernel_size=3, output_padding=1, padding=0, stride=2),  # 16x16 => 34x34
+                        act_fn(),
+                        nn.Conv2d(c_hid, c_hid, kernel_size=3, padding=1),
+                        act_fn(),
+                        nn.ConvTranspose2d(c_hid, num_input_channels, kernel_size=3, output_padding=0, padding=0, stride=2),  # Adjusted for 34x34 => 69x69
+                        nn.Tanh(),
                     )
-                self.net = nn.Sequential(
-                    nn.ConvTranspose2d(2 * c_hid, 2 * c_hid, kernel_size=3, output_padding=1, padding=1, stride=2),  # 8x8 => 16x16
-                    act_fn(),
-                    nn.Conv2d(2 * c_hid, 2 * c_hid, kernel_size=3, padding=1),
-                    act_fn(),
-                    nn.ConvTranspose2d(2 * c_hid, c_hid, kernel_size=3, output_padding=1, padding=0, stride=2),  # 16x16 => 34x34
-                    act_fn(),
-                    nn.Conv2d(c_hid, c_hid, kernel_size=3, padding=1),
-                    act_fn(),
-                    nn.ConvTranspose2d(c_hid, num_input_channels, kernel_size=3, output_padding=0, padding=0, stride=2),  # Adjusted for 34x34 => 69x69
-                    nn.Tanh(),
-                )
-
+                elif latent_dim == 128:  # keep the same for now
+                    self.linear = nn.Sequential(
+                        nn.Linear(latent_dim + batch_latent_dim, 2 * 8 * 8 * c_hid), 
+                        act_fn(),
+                        nn.Unflatten(1, (-1, 8, 8)),
+                        )
+                    self.net = nn.Sequential(
+                        nn.ConvTranspose2d(2 * c_hid, 2 * c_hid, kernel_size=3, output_padding=1, padding=1, stride=2),  # 8x8 => 16x16
+                        act_fn(),
+                        nn.Conv2d(2 * c_hid, 2 * c_hid, kernel_size=3, padding=1),
+                        act_fn(),
+                        nn.ConvTranspose2d(2 * c_hid, c_hid, kernel_size=3, output_padding=1, padding=0, stride=2),  # 16x16 => 34x34
+                        act_fn(),
+                        nn.Conv2d(c_hid, c_hid, kernel_size=3, padding=1),
+                        act_fn(),
+                        nn.ConvTranspose2d(c_hid, num_input_channels, kernel_size=3, output_padding=0, padding=0, stride=2),  # Adjusted for 34x34 => 69x69
+                        nn.Tanh(),
+                    )
         else:
             if width == 96:
                 print('using width 96 decoder')
